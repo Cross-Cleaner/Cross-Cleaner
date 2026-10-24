@@ -3384,6 +3384,24 @@
     ]
   },
   {
+    "path": "{drive}Users\\*\\AppData\\Local\\Programs\\Litecord",
+    "class": "Messanger",
+    "category": "Logs",
+    "program": "Litecord",
+    "files_to_remove": [
+      "litecord_app.log"
+    ]
+  },
+  {
+    "path": "{drive}Users\\*\\AppData\\Local\\Programs\\Litecord",
+    "class": "Messanger",
+    "category": "Cache",
+    "program": "Litecord",
+    "directories_to_remove": [
+      ".litecord_cache"
+    ]
+  },
+  {
     "path": "{drive}Users\\*\\AppData\\Roaming\\LM Studio",
     "class": "AI",
     "category": "Logs",
@@ -7437,24 +7455,6 @@
     "program": "ССleaner",
     "directories_to_remove": [
       "LOGS"
-    ]
-  },
-  {
-    "path": "{drive}Users\\*\\AppData\\Local\\Programs\\Litecord",
-    "class": "Messanger",
-    "category": "Logs",
-    "program": "Litecord",
-    "files_to_remove": [
-      "litecord_app.log"
-    ]
-  },
-  {
-    "path": "{drive}Users\\*\\AppData\\Local\\Programs\\Litecord",
-    "class": "Messanger",
-    "category": "Cache",
-    "program": "Litecord",
-    "directories_to_remove": [
-      ".litecord_cache"
     ]
   }
 ]
