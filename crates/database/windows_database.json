@@ -5715,6 +5715,30 @@
     ]
   },
   {
+    "path": "{drive}Users\\*\\AppData\\Local\\Programs\\Serein",
+    "class": "Messanger",
+    "category": "Documentation",
+    "sub_category": "Licenses",
+    "program": "Serein",
+    "directories_to_remove": [
+      "licenses"
+    ],
+    "files_to_remove": [
+      "LICENSE-APACHE",
+      "LICENSE-MIT",
+      "THIRD_PARTY_NOTICES.md"
+    ]
+  },
+  {
+    "path": "{drive}Users\\*\\AppData\\Local\\Programs\\Serein",
+    "class": "Messanger",
+    "category": "Documentation",
+    "program": "Serein",
+    "files_to_remove": [
+      "README.md"
+    ]
+  },
+  {
     "path": "{drive}Users\\*\\Documents\\ShareX\\Backup\\*",
     "class": "Image",
     "category": "Backups",
@@ -7464,30 +7488,6 @@
     "program": "ССleaner",
     "directories_to_remove": [
       "LOGS"
-    ]
-  },
-  {
-    "path": "{drive}Users\\*\\AppData\\Local\\Programs\\Serein",
-    "class": "Messanger",
-    "category": "Documentation",
-    "sub_category": "Licenses",
-    "program": "Serein",
-    "directories_to_remove": [
-      "licenses"
-    ],
-    "files_to_remove": [
-      "LICENSE-APACHE",
-      "LICENSE-MIT",
-      "THIRD_PARTY_NOTICES.md"
-    ]
-  },
-  {
-    "path": "{drive}Users\\*\\AppData\\Local\\Programs\\Serein",
-    "class": "Messanger",
-    "category": "Documentation",
-    "program": "Serein",
-    "files_to_remove": [
-      "README.md"
     ]
   }
 ]
