@@ -2282,7 +2282,7 @@
     ]
   },
   {
-    "path": "{drive}Users\\*\\AppData\\Roaming\\.gribland\\bin\\game-cache/*",
+    "path": "{drive}Users\\*\\AppData\\Roaming\\.gribland\\bin\\game-cache\\*",
     "class": "Minecraft Launcher",
     "category": "Cache",
     "program": "GribLand",
@@ -2290,7 +2290,7 @@
     "remove_files": true
   },
   {
-    "path": "{drive}Users\\*\\AppData\\Roaming\\.gribland\\bin\\cache/*",
+    "path": "{drive}Users\\*\\AppData\\Roaming\\.gribland\\bin\\cache\\*",
     "class": "Minecraft Launcher",
     "category": "Cache",
     "program": "GribLand",
@@ -2298,7 +2298,7 @@
     "remove_files": true
   },
   {
-    "path": "{drive}Users\\*\\AppData\\Roaming\\.gribland\\game-cache/*",
+    "path": "{drive}Users\\*\\AppData\\Roaming\\.gribland\\game-cache\\*",
     "class": "Minecraft Launcher",
     "category": "Cache",
     "program": "GribLand",
@@ -2306,7 +2306,7 @@
     "remove_files": true
   },
   {
-    "path": "{drive}Users\\*\\AppData\\Roaming\\.gribland\\cache/*",
+    "path": "{drive}Users\\*\\AppData\\Roaming\\.gribland\\cache\\*",
     "class": "Minecraft Launcher",
     "category": "Cache",
     "program": "GribLand",
@@ -2314,7 +2314,7 @@
     "remove_files": true
   },
   {
-    "path": "{drive}Users\\*\\AppData\\Roaming\\.gribland\\*\\crash-reports/*",
+    "path": "{drive}Users\\*\\AppData\\Roaming\\.gribland\\*\\crash-reports\\*",
     "class": "Minecraft Launcher",
     "category": "Crashes",
     "program": "GribLand",
@@ -2322,7 +2322,7 @@
     "remove_files": true
   },
   {
-    "path": "{drive}Users\\*\\AppData\\Roaming\\.gribland\\*\\saves/*",
+    "path": "{drive}Users\\*\\AppData\\Roaming\\.gribland\\*\\saves\\*",
     "class": "Minecraft Launcher",
     "category": "Game",
     "sub_category": "Saves",
@@ -2331,7 +2331,7 @@
     "remove_files": true
   },
   {
-    "path": "{drive}Users\\*\\AppData\\Roaming\\.gribland\\*\\screenshots/*",
+    "path": "{drive}Users\\*\\AppData\\Roaming\\.gribland\\*\\screenshots\\*",
     "class": "Minecraft Launcher",
     "category": "Images",
     "program": "GribLand",
@@ -3481,7 +3481,7 @@
     ]
   },
   {
-    "path": "{drive}.loliland\\updates\\clients\\**\\crash-reports/*",
+    "path": "{drive}.loliland\\updates\\clients\\**\\crash-reports\\*",
     "class": "Minecraft Launcher",
     "category": "Crashes",
     "program": "LoliLand",
@@ -3489,7 +3489,7 @@
     "remove_files": true
   },
   {
-    "path": "{drive}.loliland\\updates\\clients\\**\\saves/*",
+    "path": "{drive}.loliland\\updates\\clients\\**\\saves\\*",
     "class": "Minecraft Launcher",
     "category": "Game",
     "sub_category": "Saves",
@@ -3498,7 +3498,7 @@
     "remove_files": true
   },
   {
-    "path": "{drive}.loliland\\updates\\clients\\*\\screenshots/*",
+    "path": "{drive}.loliland\\updates\\clients\\*\\screenshots\\*",
     "class": "Minecraft Launcher",
     "category": "Images",
     "program": "LoliLand",
@@ -3631,7 +3631,7 @@
     "remove_files": true
   },
   {
-    "path": "{drive}Users\\*\\.lunarclient\\cache/*",
+    "path": "{drive}Users\\*\\.lunarclient\\cache\\*",
     "class": "Minecraft Launcher",
     "category": "Cache",
     "program": "Lunar Client",
@@ -3733,7 +3733,7 @@
     "remove_files": true
   },
   {
-    "path": "{drive}Users\\*\\AppData\\Roaming\\MCSkill\\updates\\*\\crash-reports/*",
+    "path": "{drive}Users\\*\\AppData\\Roaming\\MCSkill\\updates\\*\\crash-reports\\*",
     "class": "Minecraft Launcher",
     "category": "Crashes",
     "program": "MCSkill",
@@ -3741,7 +3741,7 @@
     "remove_files": true
   },
   {
-    "path": "{drive}Users\\*\\AppData\\Roaming\\MCSkill\\updates\\*\\saves/*",
+    "path": "{drive}Users\\*\\AppData\\Roaming\\MCSkill\\updates\\*\\saves\\*",
     "class": "Minecraft Launcher",
     "category": "Game",
     "sub_category": "Saves",
@@ -3750,7 +3750,7 @@
     "remove_files": true
   },
   {
-    "path": "{drive}Users\\*\\AppData\\Roaming\\MCSkill\\updates\\*\\screenshots/*",
+    "path": "{drive}Users\\*\\AppData\\Roaming\\MCSkill\\updates\\*\\screenshots\\*",
     "class": "Minecraft Launcher",
     "category": "Images",
     "program": "MCSkill",
@@ -3922,7 +3922,7 @@
     ]
   },
   {
-    "path": "{drive}Users\\*\\AppData\\Roaming\\.minecraft\\crash-reports/*",
+    "path": "{drive}Users\\*\\AppData\\Roaming\\.minecraft\\crash-reports\\*",
     "class": "Minecraft Launcher",
     "category": "Crashes",
     "program": "Minecraft",
@@ -3930,7 +3930,7 @@
     "remove_files": true
   },
   {
-    "path": "{drive}Users\\*\\AppData\\Roaming\\.minecraft\\saves/*",
+    "path": "{drive}Users\\*\\AppData\\Roaming\\.minecraft\\saves\\*",
     "class": "Minecraft Launcher",
     "category": "Game",
     "sub_category": "Saves",
@@ -4229,7 +4229,7 @@
     "remove_files": true
   },
   {
-    "path": "{drive}Users\\*\\AppData\\Roaming\\MultiMC\\instances\\*\\minecraft\\saves/*",
+    "path": "{drive}Users\\*\\AppData\\Roaming\\MultiMC\\instances\\*\\minecraft\\saves\\*",
     "class": "Minecraft Launcher",
     "category": "Game",
     "sub_category": "Saves",
@@ -4238,7 +4238,7 @@
     "remove_files": true
   },
   {
-    "path": "{drive}Users\\*\\AppData\\Roaming\\MultiMC\\instances\\*\\minecraft\\screenshots/*",
+    "path": "{drive}Users\\*\\AppData\\Roaming\\MultiMC\\instances\\*\\minecraft\\screenshots\\*",
     "class": "Minecraft Launcher",
     "category": "Images",
     "program": "MultiMC",
@@ -5031,7 +5031,7 @@
     "remove_files": true
   },
   {
-    "path": "{drive}Users\\*\\AppData\\Roaming\\PolyMC\\instances\\*\\minecraft\\saves/*",
+    "path": "{drive}Users\\*\\AppData\\Roaming\\PolyMC\\instances\\*\\minecraft\\saves\\*",
     "class": "Minecraft Launcher",
     "category": "Game",
     "sub_category": "Saves",
@@ -5040,7 +5040,7 @@
     "remove_files": true
   },
   {
-    "path": "{drive}Users\\*\\AppData\\Roaming\\PolyMC\\instances\\*\\.minecraft\\saves/*",
+    "path": "{drive}Users\\*\\AppData\\Roaming\\PolyMC\\instances\\*\\.minecraft\\saves\\*",
     "class": "Minecraft Launcher",
     "category": "Game",
     "sub_category": "Saves",
@@ -5049,7 +5049,7 @@
     "remove_files": true
   },
   {
-    "path": "{drive}Users\\*\\AppData\\Roaming\\PolyMC\\instances\\*\\minecraft\\screenshots/*",
+    "path": "{drive}Users\\*\\AppData\\Roaming\\PolyMC\\instances\\*\\minecraft\\screenshots\\*",
     "class": "Minecraft Launcher",
     "category": "Images",
     "program": "PolyMC",
@@ -5057,7 +5057,7 @@
     "remove_files": true
   },
   {
-    "path": "{drive}Users\\*\\AppData\\Roaming\\PolyMC\\instances\\*\\.minecraft\\screenshots/*",
+    "path": "{drive}Users\\*\\AppData\\Roaming\\PolyMC\\instances\\*\\.minecraft\\screenshots\\*",
     "class": "Minecraft Launcher",
     "category": "Images",
     "program": "PolyMC",
@@ -5146,7 +5146,7 @@
     ]
   },
   {
-    "path": "{drive}Users\\*\\AppData\\Roaming\\PrismLauncher\\game-cache/*",
+    "path": "{drive}Users\\*\\AppData\\Roaming\\PrismLauncher\\game-cache\\*",
     "class": "Minecraft Launcher",
     "category": "Cache",
     "program": "PrismLauncher",
@@ -5154,7 +5154,7 @@
     "remove_files": true
   },
   {
-    "path": "{drive}Users\\*\\AppData\\Roaming\\PrismLauncher\\cache/*",
+    "path": "{drive}Users\\*\\AppData\\Roaming\\PrismLauncher\\cache\\*",
     "class": "Minecraft Launcher",
     "category": "Cache",
     "program": "PrismLauncher",
@@ -5190,7 +5190,7 @@
     ]
   },
   {
-    "path": "{drive}Users\\*\\AppData\\Roaming\\PrismLauncher\\instances\\*\\minecraft\\crash-reports/*",
+    "path": "{drive}Users\\*\\AppData\\Roaming\\PrismLauncher\\instances\\*\\minecraft\\crash-reports\\*",
     "class": "Minecraft Launcher",
     "category": "Crashes",
     "program": "PrismLauncher",
@@ -5198,7 +5198,7 @@
     "remove_files": true
   },
   {
-    "path": "{drive}Users\\*\\AppData\\Roaming\\PrismLauncher\\instances\\*\\.minecraft\\crash-reports/*",
+    "path": "{drive}Users\\*\\AppData\\Roaming\\PrismLauncher\\instances\\*\\.minecraft\\crash-reports\\*",
     "class": "Minecraft Launcher",
     "category": "Crashes",
     "program": "PrismLauncher",
@@ -5206,7 +5206,7 @@
     "remove_files": true
   },
   {
-    "path": "{drive}Users\\*\\AppData\\Roaming\\PrismLauncher\\instances\\*\\minecraft\\saves/*",
+    "path": "{drive}Users\\*\\AppData\\Roaming\\PrismLauncher\\instances\\*\\minecraft\\saves\\*",
     "class": "Minecraft Launcher",
     "category": "Game",
     "sub_category": "Saves",
@@ -5215,7 +5215,7 @@
     "remove_files": true
   },
   {
-    "path": "{drive}Users\\*\\AppData\\Roaming\\PrismLauncher\\instances\\*\\.minecraft\\saves/*",
+    "path": "{drive}Users\\*\\AppData\\Roaming\\PrismLauncher\\instances\\*\\.minecraft\\saves\\*",
     "class": "Minecraft Launcher",
     "category": "Game",
     "sub_category": "Saves",
@@ -5224,7 +5224,7 @@
     "remove_files": true
   },
   {
-    "path": "{drive}Users\\*\\AppData\\Roaming\\PrismLauncher\\instances\\*\\minecraft\\screenshots/*",
+    "path": "{drive}Users\\*\\AppData\\Roaming\\PrismLauncher\\instances\\*\\minecraft\\screenshots\\*",
     "class": "Minecraft Launcher",
     "category": "Images",
     "program": "PrismLauncher",
@@ -5232,7 +5232,7 @@
     "remove_files": true
   },
   {
-    "path": "{drive}Users\\*\\AppData\\Roaming\\PrismLauncher\\instances\\*\\.minecraft\\screenshots/*",
+    "path": "{drive}Users\\*\\AppData\\Roaming\\PrismLauncher\\instances\\*\\.minecraft\\screenshots\\*",
     "class": "Minecraft Launcher",
     "category": "Images",
     "program": "PrismLauncher",
@@ -6000,7 +6000,7 @@
     "remove_files": true
   },
   {
-    "path": "{drive}Users\\*\\.tecknixsoftware\\tecknixlauncher\\crash-reports/*",
+    "path": "{drive}Users\\*\\.tecknixsoftware\\tecknixlauncher\\crash-reports\\*",
     "class": "Minecraft Launcher",
     "category": "Crashes",
     "program": "Tecknix Client",
@@ -6008,7 +6008,7 @@
     "remove_files": true
   },
   {
-    "path": "{drive}Users\\*\\.tecknixsoftware\\tecknixlauncher\\saves/*",
+    "path": "{drive}Users\\*\\.tecknixsoftware\\tecknixlauncher\\saves\\*",
     "class": "Minecraft Launcher",
     "category": "Game",
     "sub_category": "Saves",
@@ -6017,7 +6017,7 @@
     "remove_files": true
   },
   {
-    "path": "{drive}Users\\*\\.tecknixsoftware\\tecknixlauncher\\screenshots/*",
+    "path": "{drive}Users\\*\\.tecknixsoftware\\tecknixlauncher\\screenshots\\*",
     "class": "Minecraft Launcher",
     "category": "Images",
     "program": "Tecknix Client",
@@ -6865,7 +6865,7 @@
     ]
   },
   {
-    "path": "{drive}Windows\\System32\\Licenses/*",
+    "path": "{drive}Windows\\System32\\Licenses\\*",
     "class": "System",
     "category": "Documentation",
     "program": "Windows",
@@ -6873,7 +6873,7 @@
     "remove_files": true
   },
   {
-    "path": "{drive}Windows\\System32\\LogFiles/*",
+    "path": "{drive}Windows\\System32\\LogFiles\\*",
     "class": "System",
     "category": "Logs",
     "program": "Windows",
@@ -6881,7 +6881,7 @@
     "remove_files": true
   },
   {
-    "path": "{drive}Windows\\System32\\Logs/*",
+    "path": "{drive}Windows\\System32\\Logs\\*",
     "class": "System",
     "category": "Logs",
     "program": "Windows",
