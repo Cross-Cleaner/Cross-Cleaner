@@ -7518,5 +7518,52 @@
     "directories_to_remove": [
       "LOGS"
     ]
+  },
+  {
+    "path": "{drive}Users\\*\\.zcode",
+    "class": "AI",
+    "category": "Backups",
+    "program": "ZCode",
+    "directories_to_remove": [
+      "backup"
+    ]
+  },
+  {
+    "path": "{drive}Users\\*\\.zcode",
+    "class": "AI",
+    "category": "Cache",
+    "program": "ZCode",
+    "directories_to_remove": [
+      "tmp"
+    ]
+  },
+  {
+    "path": "{drive}Users\\*\\.zcode\\cli",
+    "class": "AI",
+    "category": "Logs",
+    "program": "ZCode",
+    "directories_to_remove": [
+      "log"
+    ]
+  },
+  {
+    "path": "{drive}Users\\*\\.zcode\\v2",
+    "class": "AI",
+    "category": "Logs",
+    "program": "ZCode",
+    "directories_to_remove": [
+      "logs"
+    ]
+  },
+  {
+    "path": "{drive}Users\\*\\.zcode\\cli",
+    "class": "AI",
+    "category": "LastActivity",
+    "sub_category": "Conversations",
+    "program": "ZCode",
+    "directories_to_remove": [
+      "memories",
+      "rollout"
+    ]
   }
 ]
