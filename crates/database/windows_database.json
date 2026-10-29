@@ -7489,5 +7489,34 @@
     "directories_to_remove": [
       "LOGS"
     ]
+  },
+  {
+    "path": "{drive}Users\\*\\AppData\\Roaming\\horizon",
+    "class": "Minecraft Launcher",
+    "category": "Logs",
+    "program": "Horizon",
+    "directories_to_remove": [
+      "logs"
+    ]
+  },
+  {
+    "path": "{drive}Users\\*\\AppData\\Roaming\\horizon\\mod-browser",
+    "class": "Minecraft Launcher",
+    "category": "Cache",
+    "program": "Horizon",
+    "directories_to_remove": [
+      "images",
+      "checks-1"
+    ]
+  },
+  {
+    "path": "{drive}Users\\*\\AppData\\Roaming\\horizon",
+    "class": "Minecraft Launcher",
+    "category": "Game",
+    "sub_category": "Saves",
+    "program": "Horizon",
+    "directories_to_remove": [
+      "saves"
+    ]
   }
 ]
