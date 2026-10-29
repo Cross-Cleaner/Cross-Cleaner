@@ -1,9 +1,9 @@
-# Windows Clearing Programs Catalog v2.0.4.5
+# Windows Clearing Programs Catalog v2.0.4.6
 **Total categories in database:** 12
 
-**Total programs in database:** 284
+**Total programs in database:** 290
 
-**Total pathes in database:** 599
+**Total pathes in database:** 610
 
 ## AI
 
@@ -17,6 +17,8 @@
 | 6 | [Microsoft Lobe](https://github.com/orgs/lobe) | Logs |
 | 7 | [OpenCode](https://opencode.ai/download) | LastActivity, Logs |
 | 8 | [OpenCode Desktop](https://opencode.ai/download) | Cache, Logs |
+| 9 | Pi | Accounts, LastActivity |
+| 10 | ZCode | Backups, Cache, LastActivity, Logs |
 
 
 ## AntiCheat
@@ -255,7 +257,8 @@
 | --- | --- | --- |
 | 1 | [Git](https://git-scm.com/downloads) | Documentation |
 | 2 | [GitHub Desktop](https://desktop.github.com/download) | Logs |
-| 3 | [rgitui](https://github.com/noahbclarkson/rgitui) | Cache, LastActivity |
+| 3 | LazyGit | Documentation |
+| 4 | [rgitui](https://github.com/noahbclarkson/rgitui) | Cache, LastActivity |
 
 
 ## Graphics
@@ -296,12 +299,14 @@
 | 3 | [Fluxer](http://fluxer.app) | Documentation |
 | 4 | [Guilded](https://www.guilded.gg) | Logs |
 | 5 | [Jitsi](https://desktop.jitsi.org) | Documentation |
-| 6 | [MAX](https://max.ru) | Cache |
-| 7 | [Signal](https://signal.org) | Cache, Logs |
-| 8 | [Telegram](https://desktop.telegram.org) | Accounts, Cache, Logs |
-| 9 | [Thunderbird](https://www.thunderbird.net) | Crashes |
-| 10 | [Vesktop](https://vesktop.dev) | Documentation |
-| 11 | [qTox](https://qtox.github.io) | Logs |
+| 6 | [Litecord](https://github.com/Ak4ai/Litecord) | Cache, Logs |
+| 7 | [MAX](https://max.ru) | Cache |
+| 8 | [Serein](https://github.com/ViceVerse-cz/Serein) | Documentation |
+| 9 | [Signal](https://signal.org) | Cache, Logs |
+| 10 | [Telegram](https://desktop.telegram.org) | Accounts, Cache, Logs |
+| 11 | [Thunderbird](https://www.thunderbird.net) | Crashes |
+| 12 | [Vesktop](https://vesktop.dev) | Documentation |
+| 13 | [qTox](https://qtox.github.io) | Logs |
 
 
 ## Minecraft Launcher
@@ -314,19 +319,20 @@
 | 4 | [CubixWorld](https://cubixworld.net/start) | Game, Logs |
 | 5 | [CurseForge](https://www.curseforge.com/download/app) | Accounts, Cache, Cheats, Crashes, Documentation, Game, Images, Logs |
 | 6 | [GribLand](https://gribland.net/#start) | Accounts, Cache, Crashes, Documentation, Game, Images, Logs |
-| 7 | [LabyMod](https://laby.net/client) | Logs |
-| 8 | [LoliLand](https://loliland.ru/ru/start) | Crashes, Documentation, Game, Images, Logs |
-| 9 | [Lunar Client](https://www.lunarclient.com/download) | Accounts, Cache, Documentation, Logs |
-| 10 | [MCSkill](https://mcskill.net/start) | Crashes, Game, Images, Logs |
-| 11 | [McLaunch](https://github.com/mclaunch/mclaunch) | Crashes |
-| 12 | [Minecraft](https://www.minecraft.net/ru-ru/about-minecraft) | Cheats, Crashes, Game, Images, Logs |
-| 13 | [Modrinth](https://modrinth.com/app) | Accounts, Cache, Cheats, Crashes, Documentation, Game, Images, Logs |
-| 14 | [MultiMC](https://multimc.org/#Download) | Accounts, Cache, Cheats, Crashes, Documentation, Game, Images, Logs |
-| 15 | [PolyMC](https://polymc.org/download) | Accounts, Cache, Cheats, Crashes, Documentation, Game, Images, Logs |
-| 16 | [PrismLauncher](https://prismlauncher.org/download/windows) | Accounts, Cache, Cheats, Crashes, Documentation, Game, Images, Logs |
-| 17 | Salwyrr Launcher | Documentation |
-| 18 | [Tecknix Client](https://tecknix.com/download.html) | Accounts, Cache, Crashes, Documentation, Game, Images, Logs |
-| 19 | [X Minecraft Launcher](https://xmcl.app) | Game, Logs |
+| 7 | Horizon | Cache, Game, Logs |
+| 8 | [LabyMod](https://laby.net/client) | Logs |
+| 9 | [LoliLand](https://loliland.ru/ru/start) | Crashes, Documentation, Game, Images, Logs |
+| 10 | [Lunar Client](https://www.lunarclient.com/download) | Accounts, Cache, Documentation, Logs |
+| 11 | [MCSkill](https://mcskill.net/start) | Crashes, Game, Images, Logs |
+| 12 | [McLaunch](https://github.com/mclaunch/mclaunch) | Crashes |
+| 13 | [Minecraft](https://www.minecraft.net/ru-ru/about-minecraft) | Cheats, Crashes, Game, Images, Logs |
+| 14 | [Modrinth](https://modrinth.com/app) | Accounts, Cache, Cheats, Crashes, Documentation, Game, Images, Logs |
+| 15 | [MultiMC](https://multimc.org/#Download) | Accounts, Cache, Cheats, Crashes, Documentation, Game, Images, Logs |
+| 16 | [PolyMC](https://polymc.org/download) | Accounts, Cache, Cheats, Crashes, Documentation, Game, Images, Logs |
+| 17 | [PrismLauncher](https://prismlauncher.org/download/windows) | Accounts, Cache, Cheats, Crashes, Documentation, Game, Images, Logs |
+| 18 | Salwyrr Launcher | Documentation |
+| 19 | [Tecknix Client](https://tecknix.com/download.html) | Accounts, Cache, Crashes, Documentation, Game, Images, Logs |
+| 20 | [X Minecraft Launcher](https://xmcl.app) | Game, Logs |
 
 
 ## Modeling
