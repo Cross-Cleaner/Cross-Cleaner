@@ -1,0 +1,44 @@
+// A finished hook that reports through the desktop instead of the network, and
+// shows the shapes the report can be read in.
+//
+// `process` and `time` come from rune-modules and are always installed.
+
+pub fn main() {
+    cleaner::on_finished("report");
+}
+
+pub async fn report(run) {
+    // Program by program, with the per-program numbers.
+    let lines = [run.summary()];
+
+    for entry in run.entries() {
+        lines.push(entry.line());
+
+        // Which categories ended up in this row.
+        if entry.in_category("Cache") {
+            cleaner::log(`${entry.program}: cache portion is ${entry.size()}`);
+        }
+    }
+
+    // Everything cleaned under one category, if the whole run is too much.
+    let cache = run.category("Cache");
+    lines.push(format!("{} cache rows", cache.len()));
+
+    let title = "Cross Cleaner";
+    let message = lines.join("\n");
+
+    let command = process::Command::new(if cleaner::os() == "windows" {
+        "msg"
+    } else {
+        "notify-send"
+    });
+
+    command.arg(title);
+    command.arg(message);
+
+    let child = command.spawn()?;
+    child.wait().await?;
+
+    // A short pause, so two notifications in a row do not overlap.
+    time::sleep(time::Duration::from_millis(250)).await?;
+}

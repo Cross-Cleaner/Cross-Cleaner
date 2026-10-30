@@ -1,0 +1,27 @@
+// A finished hook: send what the run did to Telegram.
+//
+// `on_finished` handlers run once after every real cleaning run — never for a
+// scan or a dry run — on a background thread, so a slow request does not hold
+// up the results page. `cli clean` waits up to ten seconds for it.
+
+pub fn main() {
+    cleaner::on_finished("notify");
+}
+
+pub async fn notify(report) {
+    // `details()` is one line per program, largest first:
+    //   Chrome: 1204 files, 32 folders, 806 MB
+    let text = `Cross Cleaner freed ${report.size()}\n\n${report.details()}`;
+
+    let body = json::to_string(#{
+        "chat_id": "<chat id>",
+        "text": text,
+        "disable_web_page_preview": true,
+    })?;
+
+    let url = "https://api.telegram.org/bot<token>/sendMessage";
+
+    if !cleaner::http_post(url, body) {
+        cleaner::warn("telegram: the request did not go through");
+    }
+}

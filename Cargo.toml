@@ -8,6 +8,7 @@ members = [
     "crates/database",
     "crates/desktop",
     "crates/gui",
+    "crates/script-api",
     "crates/selfupdate",
     "crates/tui",
     # Pulled in as a build dependency by both binaries, so it is compiled anyway.

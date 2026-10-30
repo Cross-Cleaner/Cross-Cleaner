@@ -17,6 +17,7 @@
 
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::Duration;
 
 use appcore::AppState;
 use clap::Parser;
@@ -39,6 +40,12 @@ fn main() -> ExitCode {
         }
     }
 }
+
+/// How long `cli clean` waits for a script's finished hook before exiting.
+///
+/// Generous enough for a webhook on a slow connection, short enough that a hook
+/// hanging on an unreachable host does not turn a finished run into a hang.
+const HOOK_GRACE: Duration = Duration::from_secs(10);
 
 /// Runs one subcommand against a freshly built state.
 ///
@@ -75,7 +82,19 @@ fn execute(cli: Cli) -> Result<ExitCode, String> {
             Ok(ExitCode::SUCCESS)
         }
 
-        Command::Clean(args) => clean(&ui, &globals, args),
+        Command::Clean(args) => {
+            let result = clean(&ui, &globals, args);
+
+            // Scripts are told about the run on a background thread. A terminal
+            // run exits as soon as it has printed its report, so the hooks get a
+            // short grace period — a scheduled `cli clean` that posts a
+            // notification must not lose it to process exit.
+            if !globals.no_scripts && !appcore::scripts::wait_for_hooks(HOOK_GRACE) {
+                ui.line("A script's finished hook is still running; leaving it behind.");
+            }
+
+            result
+        }
 
         #[cfg(feature = "self-update")]
         Command::Update(args) => {
@@ -142,6 +161,12 @@ fn clean(ui: &Ui, globals: &Globals, args: CleanArgs) -> Result<ExitCode, String
 fn build_state(globals: &Globals) -> Result<AppState, String> {
     cleaner::custom_cleaners::register_all();
 
+    // Scripts go in before the custom-cleaner registry is read, or the ones they
+    // declare would be missing from the list this build is about to snapshot.
+    if !globals.no_scripts {
+        appcore::scripts::register_custom_cleaners();
+    }
+
     let custom_database: Arc<[CustomCleaner]> = if globals.disable_custom {
         Arc::from(Vec::new())
     } else {
@@ -159,6 +184,14 @@ fn build_state(globals: &Globals) -> Result<AppState, String> {
         None => CleanerDatabase::default_source(),
     };
 
+    // The rules a script declares are entries like any other: layered here, they
+    // are counted by the scan, shown in `plan` and cleaned by the job.
+    let database = if globals.no_scripts {
+        database
+    } else {
+        appcore::scripts::with_rules(database)
+    };
+
     #[cfg(windows)]
     {
         let registry_database = match &globals.registry_database_path {
@@ -170,6 +203,11 @@ fn build_state(globals: &Globals) -> Result<AppState, String> {
                 registry
             }
             None => RegistryDatabase::default_source(),
+        };
+        let registry_database = if globals.no_scripts {
+            registry_database
+        } else {
+            appcore::scripts::with_registry_rules(registry_database)
         };
         Ok(AppState::from_database(
             database,

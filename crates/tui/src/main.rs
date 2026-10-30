@@ -59,6 +59,7 @@ fn main() -> io::Result<()> {
     // INFO: the custom cleaners are registered in a global registry, so this
     // has to happen before the database is assembled.
     cleaner::custom_cleaners::register_all();
+    appcore::scripts::register_custom_cleaners();
 
     let custom_database: Arc<[CustomCleaner]> = if args.disable_custom {
         Arc::from(Vec::new())
@@ -79,6 +80,7 @@ fn main() -> io::Result<()> {
         }
         None => CleanerDatabase::default_source(),
     };
+    let database = appcore::scripts::with_rules(database);
 
     #[cfg(windows)]
     let state = match &args.registry_database_path {
@@ -88,11 +90,15 @@ fn main() -> io::Result<()> {
                 eprintln!("Failed to load database from file: {e}");
                 std::process::exit(1);
             }
-            AppState::from_database(database, registry, custom_database)
+            AppState::from_database(
+                database,
+                appcore::scripts::with_registry_rules(registry),
+                custom_database,
+            )
         }
         None => AppState::from_database(
             database,
-            RegistryDatabase::default_source(),
+            appcore::scripts::with_registry_rules(RegistryDatabase::default_source()),
             custom_database,
         ),
     };

@@ -39,6 +39,7 @@ crates/
   selfupdate/               Self-update / update checks (behind the
                             `self-update` Cargo feature)
   winicon/                  Windows icon resource + build dependency
+  script-api/               Rune scripting API for user cleaners
 .github/
   workflows/                CI: dev_build, release, publish, aur,
                             update_program_lists

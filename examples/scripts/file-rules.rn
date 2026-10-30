@@ -1,0 +1,61 @@
+// Declarative file rules.
+//
+// Nothing in this file deletes anything itself: it declares what the cleaning
+// engine should remove, and the engine treats those declarations exactly like
+// the built-in catalog — same categories, same progress, same results page.
+//
+// Copy it into
+//   Windows: %APPDATA%\Cross-Cleaner\Scripts
+//   Linux:   ~/.config/Cross-Cleaner/Scripts
+//   macOS:   ~/Library/Application Support/Cross-Cleaner/Scripts
+// and change the names and paths.
+
+pub fn main() {
+    // A cache folder that is worth nothing and can go entirely, folder included.
+    cleaner::file_cleaner("Example App")
+        .category("Cache")
+        .sub_category("Runtime")
+        .class("Utility")
+        .path("{username}/AppData/Local/Example App/cache")
+        .remove_all_in_dir()
+        .remove_directory_after_clean()
+        .register();
+
+    // Logs: keep the folder, drop the files, and let the engine remove it only
+    // if it ends up empty.
+    cleaner::file_cleaner("Example App")
+        .category("Logs")
+        .path("{username}/AppData/Local/Example App/logs")
+        .files_to_remove(["*.log", "*.old", "*.bak"])
+        .remove_directory_after_clean()
+        .register();
+
+    // Per-version directories under one parent: the parent stays, the version
+    // folders go.
+    cleaner::file_cleaner("Example App")
+        .category("Cache")
+        .sub_category("Updates")
+        .path("{username}/AppData/Local/Example App/updates")
+        .directories_to_remove(["*"])
+        .register();
+
+    // The same script can be shipped everywhere: `os` keeps a rule off the
+    // systems it does not belong to, without a second file.
+    cleaner::file_cleaner("Example App")
+        .category("Cache")
+        .sub_category("XDG")
+        .path("{username}/.cache/example-app")
+        .os(["linux", "macos"])
+        .remove_all_in_dir()
+        .register();
+
+    // A game, cleaned through Steam's install location rather than the profile.
+    cleaner::file_cleaner("Example Game")
+        .category("Game")
+        .sub_category("Shaders")
+        .class("Game")
+        .path("{steam}/steamapps/shadercache/ExampleGame")
+        .os(["windows", "linux"])
+        .remove_all_in_dir()
+        .register();
+}

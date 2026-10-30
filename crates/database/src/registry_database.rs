@@ -43,6 +43,11 @@ enum RegistrySource {
     File(PathBuf),
     /// In-memory database (tests).
     Memory(Arc<[CleanerDataRegistry]>),
+    /// Another source with extra entries layered on top (user scripts).
+    WithEntries {
+        base: Box<RegistrySource>,
+        entries: Arc<[CleanerDataRegistry]>,
+    },
 }
 
 /// Lazy handle over the registry database. Stores only the source; entries are
@@ -73,31 +78,35 @@ impl RegistryDatabase {
         }
     }
 
+    /// Layer `entries` on top of this database.
+    ///
+    /// Mirror of [`crate::cleaner_database::CleanerDatabase::with_entries`] for
+    /// registry rules registered by user scripts.
+    pub fn with_entries<I>(self, entries: I) -> Self
+    where
+        I: IntoIterator<Item = CleanerDataRegistry>,
+    {
+        let entries: Vec<CleanerDataRegistry> = entries.into_iter().collect();
+
+        if entries.is_empty() {
+            return self;
+        }
+
+        Self {
+            source: RegistrySource::WithEntries {
+                base: Box::new(self.source),
+                entries: entries.into(),
+            },
+        }
+    }
+
     /// Stream every entry through `f`. Re-reads and re-decompresses the source
     /// on each call; only one entry is alive at a time.
     pub fn for_each<F>(&self, mut f: F) -> Result<(), Box<dyn Error>>
     where
         F: FnMut(CleanerDataRegistry),
     {
-        match &self.source {
-            RegistrySource::Default => {
-                let compressed_data =
-                    include_bytes!(concat!(env!("OUT_DIR"), "/registry_database.min.json.gz"));
-                let decoder = GzDecoder::new(&compressed_data[..]);
-                for_each_array(decoder, &mut f)?;
-            }
-            RegistrySource::File(path) => {
-                let reader = BufReader::new(File::open(path)?);
-                for_each_array(reader, &mut f)?;
-            }
-            RegistrySource::Memory(entries) => {
-                for entry in entries.iter().cloned() {
-                    f(entry);
-                }
-            }
-        }
-
-        Ok(())
+        stream_entries(&self.source, &mut f)
     }
 
     /// Stream lightweight index entries ([`RegistryIndex`]); only category,
@@ -106,26 +115,76 @@ impl RegistryDatabase {
     where
         F: FnMut(RegistryIndex),
     {
-        match &self.source {
-            RegistrySource::Default => {
-                let compressed_data =
-                    include_bytes!(concat!(env!("OUT_DIR"), "/registry_database.min.json.gz"));
-                let decoder = GzDecoder::new(&compressed_data[..]);
-                for_each_array(decoder, &mut f)?;
-            }
-            RegistrySource::File(path) => {
-                let reader = BufReader::new(File::open(path)?);
-                for_each_array(reader, &mut f)?;
-            }
-            RegistrySource::Memory(entries) => {
-                for entry in entries.iter() {
-                    f(RegistryIndex::from(entry));
-                }
+        stream_index(&self.source, &mut f)
+    }
+}
+
+/// Walk `source`, handing every entry to `f`.
+#[cfg(windows)]
+fn stream_entries<F>(source: &RegistrySource, f: &mut F) -> Result<(), Box<dyn Error>>
+where
+    F: FnMut(CleanerDataRegistry),
+{
+    match source {
+        RegistrySource::Default => {
+            let compressed_data =
+                include_bytes!(concat!(env!("OUT_DIR"), "/registry_database.min.json.gz"));
+            let decoder = GzDecoder::new(&compressed_data[..]);
+            for_each_array(decoder, &mut *f)?;
+        }
+        RegistrySource::File(path) => {
+            let reader = BufReader::new(File::open(path)?);
+            for_each_array(reader, &mut *f)?;
+        }
+        RegistrySource::Memory(entries) => {
+            for entry in entries.iter().cloned() {
+                f(entry);
             }
         }
+        RegistrySource::WithEntries { base, entries } => {
+            stream_entries(base, f)?;
 
-        Ok(())
+            for entry in entries.iter().cloned() {
+                f(entry);
+            }
+        }
     }
+
+    Ok(())
+}
+
+/// Streaming counterpart of [`stream_entries`] for [`RegistryIndex`].
+#[cfg(windows)]
+fn stream_index<F>(source: &RegistrySource, f: &mut F) -> Result<(), Box<dyn Error>>
+where
+    F: FnMut(RegistryIndex),
+{
+    match source {
+        RegistrySource::Default => {
+            let compressed_data =
+                include_bytes!(concat!(env!("OUT_DIR"), "/registry_database.min.json.gz"));
+            let decoder = GzDecoder::new(&compressed_data[..]);
+            for_each_array(decoder, &mut *f)?;
+        }
+        RegistrySource::File(path) => {
+            let reader = BufReader::new(File::open(path)?);
+            for_each_array(reader, &mut *f)?;
+        }
+        RegistrySource::Memory(entries) => {
+            for entry in entries.iter() {
+                f(RegistryIndex::from(entry));
+            }
+        }
+        RegistrySource::WithEntries { base, entries } => {
+            stream_index(base, f)?;
+
+            for entry in entries.iter() {
+                f(RegistryIndex::from(entry));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(windows)]

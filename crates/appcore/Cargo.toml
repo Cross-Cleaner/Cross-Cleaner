@@ -10,6 +10,7 @@ path = "src/lib.rs"
 [dependencies]
 database = { path = "../database" }
 cleaner = { path = "../cleaner" }
+script-api = { path = "../script-api" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
 futures = "0.3"
 notify-rust = "4"

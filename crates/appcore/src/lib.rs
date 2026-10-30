@@ -19,6 +19,7 @@ pub mod browser;
 pub mod categories;
 pub mod cleaning;
 pub mod config;
+pub mod scripts;
 pub mod sounds;
 pub mod updater;
 

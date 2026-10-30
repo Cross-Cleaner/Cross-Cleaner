@@ -101,6 +101,94 @@ Common flags: `-a/--all`, `-c/--category`, `-x/--exclude-category`,
 
 Exit codes: `0` success, `1` a failure, `130` interrupted with Ctrl-C.
 
+## 🧩 User Scripts
+
+Your own cleanings, written in [Rune](https://rune-rs.github.io/) — a small
+Rust-like language — and picked up by every edition (CLI, TUI, desktop). A
+script adds programs and patterns to the same lists the built-in catalog lives
+in, so they are selected, counted and cleaned exactly like everything else.
+
+Drop `*.rn` files into the `Scripts` folder:
+
+| System | Location |
+|---|---|
+| Windows | `%APPDATA%\Cross-Cleaner\Scripts` |
+| Linux | `~/.config/Cross-Cleaner/Scripts` |
+| macOS | `~/Library/Application Support/Cross-Cleaner/Scripts` |
+
+A complete script — a static rule, a rule that decides at cleaning time, and a
+Telegram notification when the run is over:
+
+```rune
+pub fn main() {
+    // Everything in the cache folder goes, and the folder itself goes too.
+    cleaner::file_cleaner("My App")
+        .category("Cache")
+        .path("{username}/AppData/Local/My App/Cache")
+        .remove_all_in_dir()
+        .remove_directory_after_clean()
+        .register();
+
+    // Hand-picked files: the handler runs at cleaning time and receives the
+    // expanded path. Only the ones it removes are counted.
+    cleaner::custom_cleaner("My App")
+        .category("Logs")
+        .path("{username}/AppData/Roaming/My App/logs")
+        .handler("clean_logs")
+        .register();
+
+    // Called once after every cleaning run, with what was freed.
+    cleaner::on_finished("notify");
+}
+
+pub fn clean_logs(path) {
+    let week = 7 * 24 * 60 * 60;
+    let cutoff = cleaner::now() - week;
+
+    for file in cleaner::glob(`${path}/**/*.log`) {
+        let old = match cleaner::modified(file) {
+            Some(when) => when < cutoff,
+            None => false,
+        };
+
+        if old {
+            cleaner::remove_file(file);
+        }
+    }
+}
+
+pub async fn notify(report) {
+    // `report` carries the totals and one row per program.
+    let body = json::to_string(#{ "text": report.details() })?;
+    cleaner::http_post("https://api.telegram.org/bot<token>/sendMessage", body);
+}
+```
+
+What a script can reach:
+
+| | |
+|---|---|
+| `cleaner::file_cleaner(..)` | Declarative paths, globs and whole folders |
+| `cleaner::registry_cleaner(..)` | Declarative registry keys and values (Windows) |
+| `cleaner::custom_cleaner(..)` | A path plus your own handler |
+| `cleaner::glob`, `list`, `is_file`, `modified`, `now` | Look before you delete |
+| `cleaner::remove_file`, `remove_files`, `remove_all` | Delete, and count what went |
+| `cleaner::registry::{read, values, keys, delete_key, ..}` | Inspect and prune the registry (Windows) |
+| `cleaner::on_finished(handler)` | Report the run: bytes, files, folders, per program |
+| `cleaner::http_get`, `http_post`, `log`, `warn` | Webhooks and diagnostics |
+
+Rune's `std` (strings, iterators, `Option`, `Result`, `format!`, `std::io`,
+`std::fmt`) is available, plus the [rune-modules] `fs`, `json`, `rand`, `time`
+and `process` modules. It is Rust-*like*, not Rust: no raw strings, no traits,
+and backtick template literals interpolate with `${...}`.
+
+A script that fails to compile, or whose `main` panics, is reported and skipped
+without touching the databases it had half-registered; the others keep working.
+`cli --no-scripts true` (and `--no-scripts` in the apps' config) turns them off
+entirely, including the `on_finished` hooks.
+
+[rune-modules]: https://docs.rs/rune-modules
+
 ## 📥 Installation
 
 ### Option 1: Download Pre-built Binary

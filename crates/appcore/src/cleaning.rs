@@ -389,6 +389,16 @@ pub async fn work_with(
     // claiming the disk was cleared when nothing was.
     if mode.removes() {
         notify_result(bytes_cleared, removed_files, removed_directories);
+
+        // Scripts hear about the run after it is over, with the rows the results
+        // page will show — not the selection, which is what was *asked* for. The
+        // hooks run on their own thread, so a slow webhook cannot stall the UI.
+        crate::scripts::notify_finished(
+            bytes_cleared,
+            removed_files,
+            removed_directories,
+            &cleared_programs,
+        );
     }
 
     // Largest first for the same reason: a locked file is the one the user has

@@ -1,0 +1,62 @@
+// Registry cleaning.
+//
+// Two ways in: `registry_cleaner` declares a rule the engine runs (same as the
+// built-in registry database), `cleaner::registry::*` walks the keys itself from
+// a handler when the rule is not expressible.
+//
+// Registry work only does something on Windows. The declarative rule is still
+// collected everywhere — it just has no registry to join — and the imperative
+// calls are no-ops elsewhere, so this file loads on every system.
+
+pub fn main() {
+    // Declarative: everything under the app's key goes.
+    cleaner::registry_cleaner("Example App")
+        .category("Registry")
+        .sub_category("Settings")
+        .path("HKEY_CURRENT_USER\\Software\\Example App")
+        .os(["windows"])
+        .remove_all_in_tree()
+        .register();
+
+    // Declarative: keep the key, drop the traces the app leaves in it.
+    cleaner::registry_cleaner("Example App")
+        .category("Registry")
+        .sub_category("History")
+        .path("HKEY_CURRENT_USER\\Software\\Example App\\History")
+        .os(["windows"])
+        .values_to_remove(["LastOpened", "LastFolder"])
+        .keys_to_remove(["Backup"])
+        .register();
+
+    // Imperative: session keys, which the rule form cannot pattern on.
+    cleaner::custom_cleaner("Example App")
+        .category("Registry")
+        .sub_category("Sessions")
+        .path("HKEY_CURRENT_USER\\Software\\Example App\\Sessions")
+        .handler("clean_sessions")
+        .os(["windows"])
+        .register();
+}
+
+pub fn clean_sessions(path) {
+    if cleaner::os() != "windows" {
+        return;
+    }
+
+    let base = "HKEY_CURRENT_USER\\Software\\Example App\\Sessions";
+
+    for sub in cleaner::registry::keys(base) {
+        if sub.starts_with("session-") {
+            // Deleted entries are counted against this handler, exactly like a
+            // file deletion.
+            cleaner::registry::delete_key(format!("{}\\{}", base, sub));
+        }
+    }
+
+    // Values are readable too, which is how a script decides before deleting.
+    if let Some(last) = cleaner::registry::read(base, "LastSession") {
+        if last.is_empty() {
+            cleaner::registry::delete_value(base, "LastSession");
+        }
+    }
+}

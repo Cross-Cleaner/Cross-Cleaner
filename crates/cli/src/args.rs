@@ -46,6 +46,20 @@ pub struct Globals {
     )]
     pub disable_custom: bool,
 
+    /// Disable user scripts (the `Scripts` directory).
+    ///
+    /// Their rules, registry cleanings and custom cleaners are left out, and
+    /// their `on_finished` hooks do not run: a scheduled run that must not send
+    /// notifications passes this.
+    #[arg(
+        long,
+        global = true,
+        value_name = "bool",
+        default_value_t = false,
+        action = ArgAction::Set
+    )]
+    pub no_scripts: bool,
+
     /// Read the cleaner database from this file instead of the built-in one.
     #[arg(long, global = true, value_name = "path")]
     pub database_path: Option<PathBuf>,

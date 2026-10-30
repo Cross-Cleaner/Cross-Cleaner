@@ -1,0 +1,30 @@
+[package]
+name = "script-api"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+database = { path = "../database" }
+glob = "0.3.4"
+rune = "0.14.2"
+# The standard Rune modules scripts are written against: `std::fs` for reading,
+# `json` for building webhook payloads, `rand` for jitter, `time` for deadlines,
+# `process` for programs that only answer to their own command line.
+rune-modules = { version = "0.14.2", default-features = false, features = [
+    "fs",
+    "json",
+    "rand",
+    "time",
+    "process",
+] }
+tokio = { version = "1", features = ["rt", "sync", "time"] }
+# The same client the update check uses, so no second TLS stack is pulled in
+# only for the finished-run webhook.
+ureq = { version = "3.4", features = ["json"] }
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.56.0"
+
+[dev-dependencies]
+tempfile = "3.27"
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }

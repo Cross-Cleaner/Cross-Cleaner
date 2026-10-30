@@ -1,0 +1,42 @@
+// A custom cleaner: the rule names a path, the handler decides what in it goes.
+//
+// Use this when a path rule cannot express the decision — here, "logs older than
+// a week, except the one the app is currently writing".
+
+pub fn main() {
+    cleaner::custom_cleaner("Example App")
+        .category("Logs")
+        .sub_category("Old")
+        .id("example-app-old-logs")
+        .path("{username}/AppData/Local/Example App/logs")
+        .handler("clean_old_logs")
+        // Its own slot in the progress bar: a handler that walks a big tree
+        // should not look stuck next to the built-in cleaners.
+        .sequential()
+        .register();
+}
+
+// Called by the cleaning job with the expanded path. Deletions are counted by
+// the removal calls themselves, so nothing has to be returned.
+pub fn clean_old_logs(path) {
+    let cutoff = cleaner::now() - 7 * 24 * 60 * 60;
+
+    for file in cleaner::glob(`${path}/**/*.log`) {
+        let old = match cleaner::modified(file) {
+            Some(when) => when < cutoff,
+            None => false,
+        };
+
+        if old {
+            cleaner::remove_file(file);
+        }
+    }
+
+    // Count what the handler removed with code of its own. `fs` is the
+    // rune-modules module; `cleaner::write` is the synchronous shorthand.
+    let marker = `${path}/last-clean.txt`;
+    cleaner::write(marker, format!("cleaned at {}", cleaner::now()));
+
+    let totals = cleaner::stats();
+    cleaner::log(`old logs: ${totals.files} files, ${totals.bytes} bytes`);
+}

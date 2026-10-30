@@ -380,6 +380,8 @@ async fn run(backend: BackendChoice) -> eframe::Result {
 
     // INFO: Register all built-in custom cleanings (functions in cleaner::custom_cleaners)
     cleaner::custom_cleaners::register_all();
+    // INFO: Scripts register theirs into the same registry, before it is read.
+    appcore::scripts::register_custom_cleaners();
 
     let custom_database: Arc<[CustomCleaner]> = if args.disable_custom {
         Arc::from(Vec::new())
@@ -399,6 +401,7 @@ async fn run(backend: BackendChoice) -> eframe::Result {
     } else {
         CleanerDatabase::default_source()
     };
+    let database = appcore::scripts::with_rules(database);
 
     #[cfg(windows)]
     let registry_database = if let Some(db_path) = &args.registry_database_path {
@@ -411,6 +414,8 @@ async fn run(backend: BackendChoice) -> eframe::Result {
     } else {
         RegistryDatabase::default_source()
     };
+    #[cfg(windows)]
+    let registry_database = appcore::scripts::with_registry_rules(registry_database);
     // Keep original databases for the fallback loop (they are Clone and cheap).
     // `app` is only needed to compute window height.
     #[cfg(windows)]

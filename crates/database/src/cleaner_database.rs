@@ -83,6 +83,16 @@ enum CleanerSource {
     File(PathBuf),
     /// In-memory database (tests).
     Memory(Arc<[CleanerData]>),
+    /// Another source with extra entries layered on top (user scripts).
+    ///
+    /// Kept as a wrapper instead of merging eagerly so the built-in database
+    /// keeps its streaming property: `with_entries` is called with a handful of
+    /// script entries, and the compressed catalog behind `base` is still
+    /// decompressed entry by entry on each walk.
+    WithEntries {
+        base: Box<CleanerSource>,
+        entries: Arc<[CleanerData]>,
+    },
 }
 
 /// Lazy handle over the cleaner database. Stores only the source (a path or a
@@ -115,56 +125,37 @@ impl CleanerDatabase {
         }
     }
 
+    /// Layer `entries` on top of this database.
+    ///
+    /// This is how user-registered rules (see the `mods-api` crate) join the
+    /// catalog: the base keeps streaming from its own source, and the extra
+    /// entries are expanded after it. An empty set returns the database
+    /// unchanged, so a caller does not have to special-case "no scripts".
+    pub fn with_entries<I>(self, entries: I) -> Self
+    where
+        I: IntoIterator<Item = CleanerData>,
+    {
+        let entries: Vec<CleanerData> = entries.into_iter().collect();
+
+        if entries.is_empty() {
+            return self;
+        }
+
+        Self {
+            source: CleanerSource::WithEntries {
+                base: Box::new(self.source),
+                entries: entries.into(),
+            },
+        }
+    }
+
     /// Stream every expanded entry through `f`. Re-reads and re-decompresses
     /// the source on each call; only one entry is alive at a time.
     pub fn for_each<F>(&self, mut f: F) -> Result<(), Box<dyn Error>>
     where
         F: FnMut(CleanerData),
     {
-        let ctx = expansion();
-
-        match &self.source {
-            CleanerSource::Default => {
-                #[cfg(target_os = "linux")]
-                // NOTE: DataBase for Linux and Unix (minified and compressed at compile time)
-                let compressed_data =
-                    include_bytes!(concat!(env!("OUT_DIR"), "/linux_database.min.json.gz"));
-                #[cfg(windows)]
-                // NOTE: DataBase for Windows (minified and compressed at compile time)
-                let compressed_data =
-                    include_bytes!(concat!(env!("OUT_DIR"), "/windows_database.min.json.gz"));
-                #[cfg(target_os = "macos")]
-                // NOTE: DataBase for MacOS (minified and compressed at compile time)
-                let compressed_data =
-                    include_bytes!(concat!(env!("OUT_DIR"), "/macos_database.min.json.gz"));
-                #[cfg(target_os = "android")]
-                // NOTE: DataBase for Android (minified and compressed at compile time)
-                let compressed_data =
-                    include_bytes!(concat!(env!("OUT_DIR"), "/android_database.min.json.gz"));
-                #[cfg(not(any(
-                    target_os = "linux",
-                    target_os = "windows",
-                    target_os = "macos",
-                    target_os = "android"
-                )))]
-                let compressed_data: &[u8] =
-                    include_bytes!(concat!(env!("OUT_DIR"), "/linux_database.min.json.gz"));
-
-                let decoder = GzDecoder::new(&compressed_data[..]);
-                for_each_array(decoder, |entry| expand_into(entry, ctx, &mut f))?;
-            }
-            CleanerSource::File(path) => {
-                let reader = BufReader::new(File::open(path)?);
-                for_each_array(reader, |entry| expand_into(entry, ctx, &mut f))?;
-            }
-            CleanerSource::Memory(entries) => {
-                for entry in entries.iter().cloned() {
-                    expand_into(entry, ctx, &mut f);
-                }
-            }
-        }
-
-        Ok(())
+        stream_entries(&self.source, expansion(), &mut f)
     }
 
     /// Stream lightweight index entries ([`CleanerIndex`]) through `f`. Heavy
@@ -174,47 +165,124 @@ impl CleanerDatabase {
     where
         F: FnMut(CleanerIndex),
     {
-        let ctx = expansion();
+        stream_index(&self.source, expansion(), &mut f)
+    }
+}
 
-        match &self.source {
-            CleanerSource::Default => {
-                #[cfg(target_os = "linux")]
-                let compressed_data =
-                    include_bytes!(concat!(env!("OUT_DIR"), "/linux_database.min.json.gz"));
-                #[cfg(windows)]
-                let compressed_data =
-                    include_bytes!(concat!(env!("OUT_DIR"), "/windows_database.min.json.gz"));
-                #[cfg(target_os = "macos")]
-                let compressed_data =
-                    include_bytes!(concat!(env!("OUT_DIR"), "/macos_database.min.json.gz"));
-                #[cfg(target_os = "android")]
-                let compressed_data =
-                    include_bytes!(concat!(env!("OUT_DIR"), "/android_database.min.json.gz"));
-                #[cfg(not(any(
-                    target_os = "linux",
-                    target_os = "windows",
-                    target_os = "macos",
-                    target_os = "android"
-                )))]
-                let compressed_data: &[u8] =
-                    include_bytes!(concat!(env!("OUT_DIR"), "/linux_database.min.json.gz"));
+/// Walk `source`, handing every expanded entry to `f`.
+fn stream_entries<F>(
+    source: &CleanerSource,
+    ctx: &ExpansionContext,
+    f: &mut F,
+) -> Result<(), Box<dyn Error>>
+where
+    F: FnMut(CleanerData),
+{
+    match source {
+        CleanerSource::Default => {
+            #[cfg(target_os = "linux")]
+            // NOTE: DataBase for Linux and Unix (minified and compressed at compile time)
+            let compressed_data =
+                include_bytes!(concat!(env!("OUT_DIR"), "/linux_database.min.json.gz"));
+            #[cfg(windows)]
+            // NOTE: DataBase for Windows (minified and compressed at compile time)
+            let compressed_data =
+                include_bytes!(concat!(env!("OUT_DIR"), "/windows_database.min.json.gz"));
+            #[cfg(target_os = "macos")]
+            // NOTE: DataBase for MacOS (minified and compressed at compile time)
+            let compressed_data =
+                include_bytes!(concat!(env!("OUT_DIR"), "/macos_database.min.json.gz"));
+            #[cfg(target_os = "android")]
+            // NOTE: DataBase for Android (minified and compressed at compile time)
+            let compressed_data =
+                include_bytes!(concat!(env!("OUT_DIR"), "/android_database.min.json.gz"));
+            #[cfg(not(any(
+                target_os = "linux",
+                target_os = "windows",
+                target_os = "macos",
+                target_os = "android"
+            )))]
+            let compressed_data: &[u8] =
+                include_bytes!(concat!(env!("OUT_DIR"), "/linux_database.min.json.gz"));
 
-                let decoder = GzDecoder::new(&compressed_data[..]);
-                for_each_array(decoder, |entry| emit_index(entry, ctx, &mut f))?;
-            }
-            CleanerSource::File(path) => {
-                let reader = BufReader::new(File::open(path)?);
-                for_each_array(reader, |entry| emit_index(entry, ctx, &mut f))?;
-            }
-            CleanerSource::Memory(entries) => {
-                for entry in entries.iter() {
-                    emit_index(CleanerIndex::from(entry), ctx, &mut f);
-                }
+            let decoder = GzDecoder::new(&compressed_data[..]);
+            for_each_array(decoder, |entry| expand_into(entry, ctx, &mut *f))?;
+        }
+        CleanerSource::File(path) => {
+            let reader = BufReader::new(File::open(path)?);
+            for_each_array(reader, |entry| expand_into(entry, ctx, &mut *f))?;
+        }
+        CleanerSource::Memory(entries) => {
+            for entry in entries.iter().cloned() {
+                expand_into(entry, ctx, &mut *f);
             }
         }
+        CleanerSource::WithEntries { base, entries } => {
+            stream_entries(base, ctx, f)?;
 
-        Ok(())
+            for entry in entries.iter().cloned() {
+                expand_into(entry, ctx, &mut *f);
+            }
+        }
     }
+
+    Ok(())
+}
+
+/// Streaming counterpart of [`stream_entries`] for [`CleanerIndex`].
+fn stream_index<F>(
+    source: &CleanerSource,
+    ctx: &ExpansionContext,
+    f: &mut F,
+) -> Result<(), Box<dyn Error>>
+where
+    F: FnMut(CleanerIndex),
+{
+    match source {
+        CleanerSource::Default => {
+            #[cfg(target_os = "linux")]
+            let compressed_data =
+                include_bytes!(concat!(env!("OUT_DIR"), "/linux_database.min.json.gz"));
+            #[cfg(windows)]
+            let compressed_data =
+                include_bytes!(concat!(env!("OUT_DIR"), "/windows_database.min.json.gz"));
+            #[cfg(target_os = "macos")]
+            let compressed_data =
+                include_bytes!(concat!(env!("OUT_DIR"), "/macos_database.min.json.gz"));
+            #[cfg(target_os = "android")]
+            let compressed_data =
+                include_bytes!(concat!(env!("OUT_DIR"), "/android_database.min.json.gz"));
+            #[cfg(not(any(
+                target_os = "linux",
+                target_os = "windows",
+                target_os = "macos",
+                target_os = "android"
+            )))]
+            let compressed_data: &[u8] =
+                include_bytes!(concat!(env!("OUT_DIR"), "/linux_database.min.json.gz"));
+
+            let decoder = GzDecoder::new(&compressed_data[..]);
+            for_each_array(decoder, |entry| emit_index(entry, ctx, &mut *f))?;
+        }
+        CleanerSource::File(path) => {
+            let reader = BufReader::new(File::open(path)?);
+            for_each_array(reader, |entry| emit_index(entry, ctx, &mut *f))?;
+        }
+        CleanerSource::Memory(entries) => {
+            for entry in entries.iter() {
+                emit_index(CleanerIndex::from(entry), ctx, &mut *f);
+            }
+        }
+        CleanerSource::WithEntries { base, entries } => {
+            stream_index(base, ctx, f)?;
+
+            for entry in entries.iter() {
+                emit_index(CleanerIndex::from(entry), ctx, &mut *f);
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Fully materialize the built-in database (convenience; loads everything in RAM).
