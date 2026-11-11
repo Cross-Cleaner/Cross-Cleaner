@@ -5470,6 +5470,123 @@
     ]
   },
   {
+    "path": "{drive}Users\\*\\AppData\\Local\\Programs\\Quill",
+    "class": "Messanger",
+    "category": "Documentation",
+    "sub_category": "Licenses",
+    "program": "Quill",
+    "directories_to_remove": [
+      "licenses"
+    ],
+    "files_to_remove": [
+      "LICENSE",
+      "THIRD_PARTY.md",
+      "THIRD_PARTY_LICENSES.md"
+    ]
+  },
+  {
+    "path": "{drive}Users\\*\\AppData\\Local\\Programs\\Quill",
+    "class": "Messanger",
+    "category": "Documentation",
+    "program": "Quill",
+    "files_to_remove": [
+      "README.txt"
+    ]
+  },
+  {
+    "path": "{drive}Users\\*\\AppData\\Roaming\\shinycake\\Quill\\data",
+    "class": "Messanger",
+    "category": "Logs",
+    "program": "Quill",
+    "directories_to_remove": [
+      "logs"
+    ]
+  },
+  {
+    "path": "{drive}Users\\*\\AppData\\Roaming\\shinycake\\Quill\\data\\accounts\\primary\\files\\photos\\*",
+    "class": "Messanger",
+    "category": "Cache",
+    "program": "Quill",
+    "remove_files": true
+  },
+  {
+    "path": "{drive}Users\\*\\AppData\\Roaming\\shinycake\\Quill\\data\\accounts\\primary\\files\\videos\\*",
+    "class": "Messanger",
+    "category": "Cache",
+    "program": "Quill",
+    "remove_files": true
+  },
+  {
+    "path": "{drive}Users\\*\\AppData\\Roaming\\shinycake\\Quill\\data\\accounts\\primary\\files\\voice\\*",
+    "class": "Messanger",
+    "category": "Cache",
+    "program": "Quill",
+    "remove_files": true
+  },
+  {
+    "path": "{drive}Users\\*\\AppData\\Roaming\\shinycake\\Quill\\data\\accounts\\primary\\files\\video_notes\\*",
+    "class": "Messanger",
+    "category": "Cache",
+    "program": "Quill",
+    "remove_files": true
+  },
+  {
+    "path": "{drive}Users\\*\\AppData\\Roaming\\shinycake\\Quill\\data\\accounts\\primary\\files\\documents\\*",
+    "class": "Messanger",
+    "category": "Cache",
+    "program": "Quill",
+    "remove_files": true
+  },
+  {
+    "path": "{drive}Users\\*\\AppData\\Roaming\\shinycake\\Quill\\data\\accounts\\primary\\files\\animations\\*",
+    "class": "Messanger",
+    "category": "Cache",
+    "program": "Quill",
+    "remove_files": true
+  },
+  {
+    "path": "{drive}Users\\*\\AppData\\Roaming\\shinycake\\Quill\\data\\accounts\\primary\\files\\temp\\*",
+    "class": "Messanger",
+    "category": "Cache",
+    "program": "Quill",
+    "remove_files": true
+  },
+  {
+    "path": "{drive}Users\\*\\AppData\\Roaming\\shinycake\\Quill\\data\\accounts\\primary\\tdlib\\temp\\*",
+    "class": "Messanger",
+    "category": "Cache",
+    "program": "Quill",
+    "remove_files": true
+  },
+  {
+    "path": "{drive}Users\\*\\AppData\\Roaming\\shinycake\\Quill\\data\\accounts\\primary\\tdlib\\profile_photos\\*",
+    "class": "Messanger",
+    "category": "Cache",
+    "program": "Quill",
+    "remove_files": true
+  },
+  {
+    "path": "{drive}Users\\*\\AppData\\Roaming\\shinycake\\Quill\\data\\accounts\\primary\\tdlib\\stickers\\*",
+    "class": "Messanger",
+    "category": "Cache",
+    "program": "Quill",
+    "remove_files": true
+  },
+  {
+    "path": "{drive}Users\\*\\AppData\\Roaming\\shinycake\\Quill\\data\\accounts\\primary\\tdlib\\thumbnails\\*",
+    "class": "Messanger",
+    "category": "Cache",
+    "program": "Quill",
+    "remove_files": true
+  },
+  {
+    "path": "{drive}Users\\*\\AppData\\Roaming\\shinycake\\Quill\\data\\accounts\\primary\\tdlib\\wallpapers\\*",
+    "class": "Messanger",
+    "category": "Cache",
+    "program": "Quill",
+    "remove_files": true
+  },
+  {
     "path": "{drive}Program Files (x86)\\Radmin VPN",
     "class": "VPN",
     "category": "Logs",
@@ -7565,122 +7682,5 @@
     "directories_to_remove": [
       "LOGS"
     ]
-  },
-  {
-    "path": "{drive}Users\\*\\AppData\\Local\\Programs\\Quill",
-    "class": "Messanger",
-    "category": "Documentation",
-    "sub_category": "Licenses",
-    "program": "Quill",
-    "directories_to_remove": [
-      "licenses"
-    ],
-    "files_to_remove": [
-      "LICENSE",
-      "THIRD_PARTY.md",
-      "THIRD_PARTY_LICENSES.md"
-    ]
-  },
-  {
-    "path": "{drive}Users\\*\\AppData\\Local\\Programs\\Quill",
-    "class": "Messanger",
-    "category": "Documentation",
-    "program": "Quill",
-    "files_to_remove": [
-      "README.txt"
-    ]
-  },
-  {
-    "path": "{drive}Users\\*\\AppData\\Roaming\\shinycake\\Quill\\data",
-    "class": "Messanger",
-    "category": "Logs",
-    "program": "Quill",
-    "directories_to_remove": [
-      "logs"
-    ]
-  },
-  {
-    "path": "{drive}Users\\*\\AppData\\Roaming\\shinycake\\Quill\\data\\accounts\\primary\\files\\photos\\*",
-    "class": "Messanger",
-    "category": "Cache",
-    "program": "Quill",
-    "remove_files": true
-  },
-  {
-    "path": "{drive}Users\\*\\AppData\\Roaming\\shinycake\\Quill\\data\\accounts\\primary\\files\\videos\\*",
-    "class": "Messanger",
-    "category": "Cache",
-    "program": "Quill",
-    "remove_files": true
-  },
-  {
-    "path": "{drive}Users\\*\\AppData\\Roaming\\shinycake\\Quill\\data\\accounts\\primary\\files\\voice\\*",
-    "class": "Messanger",
-    "category": "Cache",
-    "program": "Quill",
-    "remove_files": true
-  },
-  {
-    "path": "{drive}Users\\*\\AppData\\Roaming\\shinycake\\Quill\\data\\accounts\\primary\\files\\video_notes\\*",
-    "class": "Messanger",
-    "category": "Cache",
-    "program": "Quill",
-    "remove_files": true
-  },
-  {
-    "path": "{drive}Users\\*\\AppData\\Roaming\\shinycake\\Quill\\data\\accounts\\primary\\files\\documents\\*",
-    "class": "Messanger",
-    "category": "Cache",
-    "program": "Quill",
-    "remove_files": true
-  },
-  {
-    "path": "{drive}Users\\*\\AppData\\Roaming\\shinycake\\Quill\\data\\accounts\\primary\\files\\animations\\*",
-    "class": "Messanger",
-    "category": "Cache",
-    "program": "Quill",
-    "remove_files": true
-  },
-  {
-    "path": "{drive}Users\\*\\AppData\\Roaming\\shinycake\\Quill\\data\\accounts\\primary\\files\\temp\\*",
-    "class": "Messanger",
-    "category": "Cache",
-    "program": "Quill",
-    "remove_files": true
-  },
-  {
-    "path": "{drive}Users\\*\\AppData\\Roaming\\shinycake\\Quill\\data\\accounts\\primary\\tdlib\\temp\\*",
-    "class": "Messanger",
-    "category": "Cache",
-    "program": "Quill",
-    "remove_files": true
-  },
-  {
-    "path": "{drive}Users\\*\\AppData\\Roaming\\shinycake\\Quill\\data\\accounts\\primary\\tdlib\\profile_photos\\*",
-    "class": "Messanger",
-    "category": "Cache",
-    "program": "Quill",
-    "remove_files": true
-  },
-  {
-    "path": "{drive}Users\\*\\AppData\\Roaming\\shinycake\\Quill\\data\\accounts\\primary\\tdlib\\stickers\\*",
-    "class": "Messanger",
-    "category": "Cache",
-    "program": "Quill",
-    "remove_files": true
-  },
-  {
-    "path": "{drive}Users\\*\\AppData\\Roaming\\shinycake\\Quill\\data\\accounts\\primary\\tdlib\\thumbnails\\*",
-    "class": "Messanger",
-    "category": "Cache",
-    "program": "Quill",
-    "remove_files": true
-  },
-  {
-    "path": "{drive}Users\\*\\AppData\\Roaming\\shinycake\\Quill\\data\\accounts\\primary\\tdlib\\wallpapers\\*",
-    "class": "Messanger",
-    "category": "Cache",
-    "program": "Quill",
-    "remove_files": true
   }
 ]
