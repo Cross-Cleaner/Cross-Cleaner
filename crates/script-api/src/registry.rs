@@ -95,6 +95,65 @@ mod imp {
         None
     }
 
+    /// The `REG_DWORD` value under `name`, as the number it is.
+    ///
+    /// `None` when the key, the value or the type is not what was asked for —
+    /// `read` instead turns a `DWORD` into text and leaves the script to parse
+    /// it back.
+    pub(crate) fn read_dword(path: &str, name: &str) -> Option<u32> {
+        let (_, root, rest) = split(path)?;
+        let key = root.open_subkey_with_flags(&rest, KEY_READ).ok()?;
+        key.get_value::<u32, _>(name).ok()
+    }
+
+    /// The `REG_QWORD` value under `name`, as the number it is.
+    pub(crate) fn read_qword(path: &str, name: &str) -> Option<u64> {
+        let (_, root, rest) = split(path)?;
+        let key = root.open_subkey_with_flags(&rest, KEY_READ).ok()?;
+        key.get_value::<u64, _>(name).ok()
+    }
+
+    /// Every subkey under `path`, down to `depth` levels, as paths relative to
+    /// it — `keys` is one level and stops there.
+    ///
+    /// Deeper keys come after their parents, so deleting them front to back
+    /// never leaves a parent a later path still needed.
+    pub(crate) fn subkeys(path: &str, depth: u32) -> Vec<String> {
+        let Some((_, root, rest)) = split(path) else {
+            return Vec::new();
+        };
+
+        let Ok(key) = root.open_subkey_with_flags(&rest, KEY_READ) else {
+            return Vec::new();
+        };
+
+        let mut found = Vec::new();
+        walk(&key, String::new(), depth, &mut found);
+        found
+    }
+
+    fn walk(key: &RegKey, prefix: String, depth: u32, found: &mut Vec<String>) {
+        let Ok(names) = key.enum_keys().collect::<Result<Vec<String>, _>>() else {
+            return;
+        };
+
+        for name in names {
+            let full = if prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{prefix}\\{name}")
+            };
+
+            found.push(full.clone());
+
+            if depth > 1
+                && let Ok(child) = key.open_subkey_with_flags(&name, KEY_READ)
+            {
+                walk(&child, full, depth - 1, found);
+            }
+        }
+    }
+
     pub(crate) fn write(path: &str, name: &str, data: &str) -> bool {
         let Some((_, root, rest)) = split(path) else {
             return false;
@@ -186,6 +245,14 @@ mod imp {
         None
     }
 
+    pub(crate) fn read_dword(_path: &str, _name: &str) -> Option<u32> {
+        None
+    }
+
+    pub(crate) fn read_qword(_path: &str, _name: &str) -> Option<u64> {
+        None
+    }
+
     pub(crate) fn write(_path: &str, _name: &str, _data: &str) -> bool {
         false
     }
@@ -198,6 +265,10 @@ mod imp {
         Vec::new()
     }
 
+    pub(crate) fn subkeys(_path: &str, _depth: u32) -> Vec<String> {
+        Vec::new()
+    }
+
     pub(crate) fn delete_value(_path: &str, _name: &str) -> bool {
         false
     }
@@ -207,4 +278,6 @@ mod imp {
     }
 }
 
-pub(crate) use imp::{delete_key, delete_value, exists, keys, read, values, write};
+pub(crate) use imp::{
+    delete_key, delete_value, exists, keys, read, read_dword, read_qword, subkeys, values, write,
+};

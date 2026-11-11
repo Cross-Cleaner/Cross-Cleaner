@@ -351,6 +351,215 @@ fn the_finished_hook_receives_the_per_program_breakdown() {
 }
 
 #[test]
+fn the_decisions_and_path_helpers_answer_about_real_files() {
+    let _guard = lock();
+    let dir = tempfile::tempdir().unwrap();
+    let cache = dir.path().join("cache");
+    let out = dir.path().join("answers.txt");
+    let missing = dir.path().join("not-here");
+
+    fs::create_dir_all(&cache).unwrap();
+    fs::write(cache.join("drop.tmp"), "0123456789").unwrap();
+    fs::write(cache.join("keep.txt"), "keep").unwrap();
+
+    let scripts = load(
+        dir.path().join("scripts").as_path(),
+        "decisions.rn",
+        &format!(
+            r#"
+            pub fn main() {{
+                cleaner::custom_cleaner("Decisions")
+                    .category("Cache")
+                    .path({})
+                    .handler("clean")
+                    .sequential()
+                    .register();
+            }}
+
+            pub fn clean(path) {{
+                for entry in cleaner::list(path) {{
+                    // A fresh file is older than zero days, so this deletes it;
+                    // `matches` decides on the name alone.
+                    if cleaner::matches(entry, "*.tmp") && cleaner::older_than(entry, 0) {{
+                        cleaner::remove_file(entry);
+                    }}
+                }}
+            }}
+            "#,
+            literal(&cache),
+        ),
+    );
+
+    assert!(scripts.errors.is_empty(), "{:?}", scripts.errors);
+
+    let cleaner = scripts.custom[0].clone();
+    let result = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async { (cleaner.function)(&cleaner, None).await });
+
+    assert!(!cache.join("drop.tmp").exists(), "older_than + matches");
+    assert!(cache.join("keep.txt").exists());
+    assert_eq!(result.files, 1);
+    assert_eq!(result.bytes, 10);
+
+    // The helpers on their own, so a broken one fails on its own name rather
+    // than as a missing file somewhere above.
+    let scripts = load(
+        dir.path().join("scripts-helpers").as_path(),
+        "helpers.rn",
+        &format!(
+            r#"
+            pub fn main() {{
+                cleaner::custom_cleaner("Helpers").path({}).handler("check").register();
+            }}
+
+            pub fn check(path) {{
+                let out = {};
+                // `join` takes its pieces, so the handler clones rather than
+                // handing its own argument away.
+                let keep = cleaner::join([path.clone(), "keep.txt"]);
+
+                let parent = match cleaner::parent(keep.clone()) {{
+                    Some(value) => value,
+                    None => format!("{{}}", ""),
+                }};
+
+                let parent_name = match cleaner::filename(parent) {{
+                    Some(value) => value,
+                    None => format!("{{}}", ""),
+                }};
+
+                let name = match cleaner::filename(keep.clone()) {{
+                    Some(value) => value,
+                    None => format!("{{}}", ""),
+                }};
+
+                cleaner::write(
+                    out,
+                    format!(
+                        "{{}}|{{}}|{{}}|{{}}|{{}}|{{}}|{{}}",
+                        cleaner::exists(keep.clone()),
+                        cleaner::older_than({}, 0),
+                        cleaner::unlocked(keep.clone()),
+                        cleaner::locked(keep),
+                        cleaner::lock_files(path).len(),
+                        name,
+                        parent_name,
+                    ),
+                );
+            }}
+            "#,
+            literal(&cache),
+            literal(&out),
+            literal(&missing),
+        ),
+    );
+
+    assert!(scripts.errors.is_empty(), "{:?}", scripts.errors);
+
+    let cleaner = scripts.custom[0].clone();
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async { (cleaner.function)(&cleaner, None).await });
+
+    let text = fs::read_to_string(&out).unwrap();
+    let fields: Vec<&str> = text.split('|').collect();
+
+    assert_eq!(fields[0], "true", "exists: {text}");
+    assert_eq!(fields[1], "false", "a missing path is not old: {text}");
+    assert_eq!(fields[2], "true", "nothing holds keep.txt: {text}");
+    assert_eq!(fields[3], "false", "locked is the inverse: {text}");
+    assert_eq!(fields[4], "0", "nothing is locked: {text}");
+    assert_eq!(fields[5], "keep.txt", "filename: {text}");
+    assert_eq!(fields[6], "cache", "parent: {text}");
+}
+
+#[test]
+fn the_started_and_error_hooks_run_in_their_own_phase() {
+    let _guard = lock();
+    let dir = tempfile::tempdir().unwrap();
+    let started = dir.path().join("started.txt");
+    let failed = dir.path().join("failed.txt");
+    let finished = dir.path().join("finished.txt");
+
+    let scripts = load(
+        dir.path().join("scripts").as_path(),
+        "hooks.rn",
+        &format!(
+            r#"
+            pub fn main() {{
+                cleaner::on_started("before");
+                cleaner::on_finished("after");
+                cleaner::on_error("problem");
+            }}
+
+            pub fn before() {{
+                cleaner::write({}, "started");
+            }}
+
+            pub fn after(report) {{
+                cleaner::write({}, "finished");
+            }}
+
+            pub fn problem(report, reason) {{
+                cleaner::write({}, reason);
+            }}
+            "#,
+            literal(&started),
+            literal(&finished),
+            literal(&failed),
+        ),
+    );
+
+    assert!(scripts.errors.is_empty(), "{:?}", scripts.errors);
+
+    script_api::notify_started();
+
+    // The started hook is synchronous: by the time this returns, it has run.
+    assert_eq!(fs::read_to_string(&started).unwrap(), "started");
+
+    // A run that went clean calls `is_finished`, not `on_error`.
+    script_api::notify_finished(0, 0, 0, &[]);
+    wait_for_file(&finished);
+    assert!(!failed.exists(), "a clean run must not call on_error");
+
+    // A run that left locked files calls `on_error`, with the reason.
+    let locked = vec![Cleared {
+        program: "Demo".into(),
+        removed_bytes: 12,
+        removed_files: 2,
+        removed_directories: 0,
+        affected_categories: vec!["Cache".into()],
+        paths: Vec::new(),
+        paths_omitted: 0,
+    }];
+
+    script_api::notify_failed(12, 2, 0, &locked, "3 files were still in use");
+    assert_eq!(
+        wait_for_file(&failed),
+        "3 files were still in use",
+        "the reason reaches the handler"
+    );
+}
+
+/// Waits for a hook to write its file, and returns its contents.
+fn wait_for_file(path: &Path) -> String {
+    for _ in 0..100 {
+        if let Ok(contents) = fs::read_to_string(path) {
+            return contents;
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    panic!("the hook never wrote {}", path.display());
+}
+
+#[test]
 fn rules_can_be_restricted_to_other_operating_systems() {
     let _guard = lock();
     let dir = tempfile::tempdir().unwrap();

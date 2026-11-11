@@ -12,7 +12,7 @@ use database::structures::CleanerDataRegistry;
 use database::structures::{CleanerData, CleanerFlags, Cleared, CustomCleaner, SharedPath};
 use rune::{Any, ContextError, Module};
 
-use crate::collect::{self, CustomDefinition};
+use crate::collect::{self, CustomDefinition, HookKind};
 use crate::files;
 use crate::registry_api;
 use crate::remove::{self, Stats};
@@ -82,6 +82,22 @@ pub fn module() -> Result<Module, ContextError> {
     module.function_meta(os)?;
     module.function_meta(glob)?;
 
+    // Decisions: the questions a cleaner asks before deleting.
+    module.function_meta(older_than)?;
+    module.function_meta(matches)?;
+    module.function_meta(unlocked)?;
+    module.function_meta(locked)?;
+    module.function_meta(lock_files)?;
+
+    // Paths: the same placeholders a rule path uses, available by hand.
+    module.function_meta(user)?;
+    module.function_meta(home)?;
+    module.function_meta(appdata)?;
+    module.function_meta(join)?;
+    module.function_meta(parent)?;
+    module.function_meta(filename)?;
+    module.function_meta(expand)?;
+
     module.function_meta(remove_all)?;
     module.function_meta(remove_files)?;
     module.function_meta(remove_directories)?;
@@ -97,7 +113,9 @@ pub fn module() -> Result<Module, ContextError> {
     module.function_meta(http_post)?;
 
     // Hooks.
+    module.function_meta(on_started)?;
     module.function_meta(on_finished)?;
+    module.function_meta(on_error)?;
 
     // The report a finished hook receives.
     module.ty::<ProgramReport>()?;
@@ -277,6 +295,138 @@ fn glob(pattern: &str) -> Vec<String> {
     files::glob(pattern)
 }
 
+/// Whether `path` is older than `days` days.
+///
+/// The one question almost every hand-written cleaner asks, and the five lines
+/// it used to take — read the modification time, match on it, compare against
+/// `now()` — collapsed into one call. A path that does not exist is `false`.
+///
+/// ```rune
+/// for file in cleaner::glob(`${path}/*.log`) {
+///     if cleaner::older_than(file, 7) {
+///         cleaner::remove_file(file);
+///     }
+/// }
+/// ```
+#[rune::function]
+fn older_than(path: &str, days: u64) -> bool {
+    files::older_than(path, days)
+}
+
+/// Whether the last component of `path` matches the name glob `pattern`.
+///
+/// For deciding about a specific path without expanding a whole pattern, and
+/// for `cleaner::remove_*` calls a script builds from its own list.
+///
+/// ```rune
+/// if cleaner::matches(entry, "*.tmp") {
+///     cleaner::remove_file(entry);
+/// }
+/// ```
+#[rune::function]
+fn matches(path: &str, pattern: &str) -> bool {
+    files::matches(path, pattern)
+}
+
+/// Whether `path` can be opened for writing right now.
+///
+/// `false` means another program holds it — the log an app is still writing,
+/// the cache a browser keeps mapped — or the user may not write it. What a
+/// cleaner checks before it spends time on a directory that will refuse to go.
+#[rune::function]
+fn unlocked(path: &str) -> bool {
+    files::unlocked(path)
+}
+
+/// Whether `path` is locked by another program.
+///
+/// The inverse of [`unlocked`], named for the branch that reads better.
+#[rune::function]
+fn locked(path: &str) -> bool {
+    files::locked(path)
+}
+
+/// Every file under `path` that is locked right now, sorted.
+///
+/// A script that has to leave a directory alone while one file in it is open
+/// asks this once rather than walking the tree itself.
+///
+/// ```rune
+/// let busy = cleaner::lock_files(cache);
+///
+/// if busy.is_empty() {
+///     cleaner::remove_all(cache);
+/// } else {
+///     cleaner::log(`left ${cache} alone: ${busy.len()} locked`);
+/// }
+/// ```
+#[rune::function]
+fn lock_files(path: &str) -> Vec<String> {
+    files::lock_files(path)
+}
+
+// --- paths -----------------------------------------------------------------
+
+/// The current user's name — what `{username}` expands to.
+#[rune::function]
+fn user() -> String {
+    files::user()
+}
+
+/// The current user's home directory — what `{home}` expands to.
+#[rune::function]
+fn home() -> String {
+    files::home()
+}
+
+/// The per-user application data directory: `AppData\Roaming` on Windows, the
+/// XDG config directory on Linux, `Application Support` on macOS.
+#[rune::function]
+fn appdata() -> String {
+    files::appdata()
+}
+
+/// Joins path segments with the platform separator.
+///
+/// The alternative — `format!("{}/{}", a, b)` — produces a doubled or stray
+/// separator on one platform and a broken path on the other.
+///
+/// ```rune
+/// let logs = cleaner::join([cleaner::home(), "AppData", "Local", "My App", "logs"]);
+/// ```
+#[rune::function]
+fn join(parts: Vec<String>) -> String {
+    files::join(parts)
+}
+
+/// The directory containing `path`, if it has one.
+#[rune::function]
+fn parent(path: &str) -> Option<String> {
+    files::parent(path)
+}
+
+/// The last component of `path` — the file or directory name.
+#[rune::function]
+fn filename(path: &str) -> Option<String> {
+    files::filename(path)
+}
+
+/// Expands `{home}`, `{username}`, `{steam}` and `{drive}` the way a rule path
+/// is expanded, one path per drive.
+///
+/// The same expansion the engine applies to a declared rule, so a handler that
+/// computes a path itself gets the answer the rule would have got.
+///
+/// ```rune
+/// for cache in cleaner::expand("{drive}/Users/{username}/AppData/Local/My App/cache") {
+///     cleaner::log(cache);
+/// }
+/// ```
+#[rune::function]
+fn expand(pattern: &str) -> Vec<String> {
+    files::expand(pattern)
+}
+
 // --- removal ---------------------------------------------------------------
 
 /// Removes everything inside `path`, keeping `path` itself.
@@ -367,6 +517,29 @@ fn http_post(url: &str, body: &str) -> bool {
 
 // --- hooks -----------------------------------------------------------------
 
+/// Registers `handler` to run once, before a cleaning run starts deleting.
+///
+/// This is where a script does what has to happen before the files go: close a
+/// background copy, take a backup, check that the machine is idle, or ask a
+/// service whether cleaning is allowed right now. It runs synchronously, so a
+/// hook that takes ten seconds delays the cleaning by ten seconds — which is
+/// exactly what it is for.
+///
+/// It is not called for a scan or a dry run: nothing is removed, so there is
+/// nothing to prepare for.
+///
+/// ```rune
+/// pub fn main() { cleaner::on_started("prepare"); }
+///
+/// pub fn prepare() {
+///     cleaner::log("a cleaning run is starting");
+/// }
+/// ```
+#[rune::function]
+fn on_started(handler: &str) {
+    collect::hook(HookKind::Started, handler.to_owned());
+}
+
 /// Registers `handler` to run once after a cleaning run finishes.
 ///
 /// The handler is called with a report of the whole run, and runs on a
@@ -385,7 +558,29 @@ fn http_post(url: &str, body: &str) -> bool {
 /// ```
 #[rune::function]
 fn on_finished(handler: &str) {
-    collect::hook(handler.to_owned());
+    collect::hook(HookKind::Finished, handler.to_owned());
+}
+
+/// Registers `handler` to run when a cleaning run finished but left something
+/// behind: a file another program still held open, a directory the user may not
+/// write, an entry the registry refused.
+///
+/// The handler receives the report of what *was* cleaned plus a one-line
+/// message saying what was not, which is what a monitoring channel wants to
+/// hear about — a run that went perfectly is not worth a notification.
+///
+/// ```rune
+/// pub fn main() { cleaner::on_error("report_problem"); }
+///
+/// pub async fn report_problem(report, problem) {
+///     let text = format!("{} — but: {}", report.summary(), problem);
+///     let body = json::to_string(#{ "text": text })?;
+///     cleaner::http_post(url, body);
+/// }
+/// ```
+#[rune::function]
+fn on_error(handler: &str) {
+    collect::hook(HookKind::Failed, handler.to_owned());
 }
 
 // --- builders --------------------------------------------------------------
@@ -1019,6 +1214,16 @@ pub struct Report {
     /// How many programs contributed to the run.
     #[rune(get)]
     pub programs: u64,
+    /// When the run started, in seconds since the Unix epoch.
+    ///
+    /// `0` when the start was not recorded — a frontend that never called
+    /// `cleaner::on_started`'s counterpart, which in practice means an older
+    /// build.
+    #[rune(get)]
+    pub started_at: u64,
+    /// How long the run took, in seconds. `0` when the start was not recorded.
+    #[rune(get)]
+    pub duration: u64,
     /// One entry per program, largest first.
     entries: Vec<ProgramReport>,
     // Read by scripts through the getters below; unreachable for the compiler.
@@ -1074,7 +1279,14 @@ impl Report {
 }
 
 /// Builds the report from a finished run.
-pub(crate) fn report(bytes: u64, files: u64, folders: u64, cleared: &[Cleared]) -> Report {
+pub(crate) fn report(
+    bytes: u64,
+    files: u64,
+    folders: u64,
+    cleared: &[Cleared],
+    started_at: u64,
+    duration: u64,
+) -> Report {
     // Programs appear once per category, so the rows are folded: a program
     // cleaned under two categories is one entry listing both, not two entries
     // that each hold half the numbers.
@@ -1132,6 +1344,8 @@ pub(crate) fn report(bytes: u64, files: u64, folders: u64, cleared: &[Cleared]) 
         folders,
         bytes,
         programs: entries.len() as u64,
+        started_at,
+        duration,
         entries,
         summary,
         details,

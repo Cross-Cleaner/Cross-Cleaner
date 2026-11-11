@@ -19,6 +19,143 @@ pub(crate) fn read(path: &str) -> Option<String> {
     fs::read_to_string(path).ok()
 }
 
+/// Whether `path` is older than `days` days.
+///
+/// A missing path is not old, it simply is not there: the answer is `false`,
+/// because the script's next step is a deletion that would do nothing.
+pub(crate) fn older_than(path: &str, days: u64) -> bool {
+    let Some(modified) = modified(path) else {
+        return false;
+    };
+
+    let now = now();
+
+    // WARN: `>=` rather than `>`: "older than zero days" is true of any file that
+    // already exists, which is what a script writing `older_than(file, 0)` means.
+    // A modification time in the future subtracts to nothing and stays false.
+    now.saturating_sub(modified) >= days * 24 * 60 * 60
+}
+
+/// Whether the last component of `path` matches `pattern`.
+///
+/// The pattern is a name glob (`*.log`), not a path glob: comparing a whole
+/// path against a pattern is what [`glob`] is for.
+pub(crate) fn matches(path: &str, pattern: &str) -> bool {
+    let name = Path::new(path)
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_default();
+
+    glob::Pattern::new(pattern)
+        .map(|pattern| pattern.matches(&name))
+        .unwrap_or(false)
+}
+
+/// Whether `path` can be opened for writing right now.
+///
+/// A file held open by another process — a log the app is still writing, a
+/// cache the browser keeps mapped — fails here, which is when a script should
+/// leave it alone. The file is opened without truncating: this asks, it does
+/// not damage.
+///
+/// Also `false` for a missing file and for one the user may not write.
+pub(crate) fn unlocked(path: &str) -> bool {
+    fs::OpenOptions::new().write(true).open(path).is_ok()
+}
+
+/// Whether `path` is locked by another process.
+pub(crate) fn locked(path: &str) -> bool {
+    Path::new(path).exists() && !unlocked(path)
+}
+
+/// Every file under `path` that is locked right now, as full paths, sorted.
+///
+/// What a script uses to leave a whole cache alone while one file in it is
+/// still open, rather than deleting half of it.
+pub(crate) fn lock_files(path: &str) -> Vec<String> {
+    let mut locked_paths: Vec<String> = walk_files(Path::new(path))
+        .into_iter()
+        .filter(|file| locked(&file.to_string_lossy()))
+        .map(|file| file.to_string_lossy().into_owned())
+        .collect();
+
+    locked_paths.sort();
+    locked_paths
+}
+
+/// Every regular file under `directory`, recursively.
+fn walk_files(directory: &Path) -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
+    let mut pending = vec![directory.to_path_buf()];
+
+    while let Some(directory) = pending.pop() {
+        let Ok(entries) = fs::read_dir(&directory) else {
+            continue;
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.is_file() {
+                files.push(path);
+            }
+        }
+    }
+
+    files
+}
+
+/// The current user's name — what `{username}` expands to.
+pub(crate) fn user() -> String {
+    database::cleaner_database::placeholder_username()
+}
+
+/// The current user's home directory — what `{home}` expands to.
+pub(crate) fn home() -> String {
+    database::cleaner_database::placeholder_home()
+}
+
+/// The per-user application data directory: `AppData\Roaming` on Windows,
+/// the XDG config directory on Linux, `Application Support` on macOS.
+pub(crate) fn appdata() -> String {
+    crate::loader::platform_data_dir()
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Joins path segments with the platform separator.
+pub(crate) fn join(parts: Vec<String>) -> String {
+    let mut path = std::path::PathBuf::new();
+
+    for part in parts {
+        path.push(part);
+    }
+
+    path.to_string_lossy().into_owned()
+}
+
+/// The directory containing `path`, if it has one.
+pub(crate) fn parent(path: &str) -> Option<String> {
+    Path::new(path)
+        .parent()
+        .map(|parent| parent.to_string_lossy().into_owned())
+}
+
+/// The last component of `path`, file name included.
+pub(crate) fn filename(path: &str) -> Option<String> {
+    Path::new(path)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+}
+
+/// Expands `{home}`, `{username}`, `{steam}` and `{drive}` the way a rule path
+/// is expanded, one entry per drive.
+pub(crate) fn expand(pattern: &str) -> Vec<String> {
+    database::cleaner_database::expand_path(pattern)
+}
+
 /// Writes `data` to `path`, replacing the file. `true` on success.
 pub(crate) fn write(path: &str, data: &str) -> bool {
     fs::write(path, data).is_ok()

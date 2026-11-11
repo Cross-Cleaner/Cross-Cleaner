@@ -18,7 +18,10 @@ use database::cleaner_database::CleanerDatabase;
 #[cfg(windows)]
 use database::registry_database::RegistryDatabase;
 
-pub use script_api::{ScriptError, Scripts, notify_finished, scripts_dir, wait_for_hooks};
+pub use script_api::{
+    ScriptError, Scripts, notify_failed, notify_finished, notify_started, scripts_dir,
+    wait_for_hooks,
+};
 
 /// Layers the rules the user's scripts declared over `database`.
 ///

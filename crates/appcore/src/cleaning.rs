@@ -179,6 +179,14 @@ pub async fn work_with(
 ) -> ScanReport {
     let mut current_task = 0;
 
+    // Scripts hear about the run before the first deletion, not after it: a
+    // started hook is where a script closes a copy or takes a backup, so it has
+    // to run while the files are still there. A scan deletes nothing, so it
+    // prepares for nothing.
+    if mode.removes() {
+        crate::scripts::notify_started();
+    }
+
     // ASYNC without threads: pure FuturesUnordered
     let mut bytes_cleared: u64 = 0;
     let mut removed_files: u64 = 0;
@@ -393,12 +401,27 @@ pub async fn work_with(
         // Scripts hear about the run after it is over, with the rows the results
         // page will show — not the selection, which is what was *asked* for. The
         // hooks run on their own thread, so a slow webhook cannot stall the UI.
-        crate::scripts::notify_finished(
-            bytes_cleared,
-            removed_files,
-            removed_directories,
-            &cleared_programs,
-        );
+        //
+        // A run that left something behind goes to the `on_error` hooks instead:
+        // one message per run, and the one worth sending is the one that says
+        // *this did not go to plan*.
+        let problem = leftover_problem(denied_files, locked_files);
+
+        match problem {
+            Some(problem) => crate::scripts::notify_failed(
+                bytes_cleared,
+                removed_files,
+                removed_directories,
+                &cleared_programs,
+                &problem,
+            ),
+            None => crate::scripts::notify_finished(
+                bytes_cleared,
+                removed_files,
+                removed_directories,
+                &cleared_programs,
+            ),
+        }
     }
 
     // Largest first for the same reason: a locked file is the one the user has
@@ -419,6 +442,29 @@ pub async fn work_with(
         denied_bytes,
         denied: denied.into(),
         unmeasured,
+    }
+}
+
+/// What a run left behind, as one line for the `on_error` hooks.
+///
+/// `None` when the run went clean, which is what makes the caller pick between
+/// the two hooks. A count is enough for a message and precise enough to tell
+/// "nothing" from "a lot", without replicating the results page in a string.
+fn leftover_problem(denied: u64, locked: u64) -> Option<String> {
+    let mut parts = Vec::new();
+
+    if denied > 0 {
+        parts.push(format!("{denied} files could not be removed"));
+    }
+
+    if locked > 0 {
+        parts.push(format!("{locked} files were still in use"));
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("; "))
     }
 }
 

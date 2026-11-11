@@ -1,0 +1,46 @@
+// Tell a monitoring channel two things: that a run is about to start, and
+// whether it actually went clean.
+//
+// `on_started` runs before the first deletion (synchronously, so it can still
+// take a backup); `on_finished` runs after a clean run, `on_error` after one
+// that left something behind — exactly one of the two per run.
+
+const HOOK = "https://example.com/cross-cleaner";
+
+pub fn main() {
+    cleaner::on_started("before");
+    cleaner::on_finished("after");
+    cleaner::on_error("problem");
+}
+
+pub async fn before() {
+    let body = json::to_string(#{ "event": "started" })?;
+    cleaner::http_post(`${HOOK}/started`, body);
+}
+
+pub async fn after(report) {
+    // `summary()` is one sentence; `details()` is one line per program.
+    let body = json::to_string(#{
+        "event": "finished",
+        "text": report.summary(),
+        "details": report.details(),
+        "bytes": report.bytes,
+        "files": report.files,
+        "folders": report.folders,
+        "duration": report.duration,
+    })?;
+
+    cleaner::http_post(`${HOOK}/finished`, body);
+}
+
+pub async fn problem(report, reason) {
+    // A run that left a locked file behind: the numbers are still the numbers of
+    // what *was* cleaned, and `reason` says what was not.
+    let body = json::to_string(#{
+        "event": "incomplete",
+        "text": `${report.summary()} — but: ${reason}`,
+        "details": report.details(),
+    })?;
+
+    cleaner::http_post(`${HOOK}/incomplete`, body);
+}

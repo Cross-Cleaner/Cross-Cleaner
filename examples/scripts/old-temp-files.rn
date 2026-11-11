@@ -1,0 +1,31 @@
+// Delete only what is really garbage: temp files that are a week old and that
+// no running program still holds open.
+//
+// Shows `cleaner::matches`, `cleaner::older_than`, `cleaner::unlocked` and the
+// path helpers — the four questions almost every hand-written cleaner asks.
+
+pub fn main() {
+    cleaner::custom_cleaner("Old Temp Files")
+        .category("Temporary Files")
+        .path(cleaner::join([cleaner::appdata(), "..", "Local", "Temp"]))
+        .handler("clean")
+        .register();
+}
+
+pub fn clean(path) {
+    let freed = 0u64;
+
+    for entry in cleaner::glob(`${path}/**/*`) {
+        let temp = cleaner::matches(entry, "*.tmp") || cleaner::matches(entry, "*.log");
+
+        if !temp || !cleaner::older_than(entry, 7) || !cleaner::unlocked(entry) {
+            continue;
+        }
+
+        freed += cleaner::remove_file(entry).bytes;
+    }
+
+    // What happened to the run is logged next to the results, not printed over
+    // the TUI or the window.
+    cleaner::log(`old temp files: ${freed} bytes`);
+}

@@ -16,9 +16,13 @@ there is compiled by the test suite, so it is guaranteed to be valid API.
   - [Declarative registry rules](#declarative-registry-rules-registry_cleaner)
   - [Custom cleaners](#custom-cleaners-custom_cleaner)
   - [Looking around](#looking-around)
+  - [Deciding what to delete](#deciding-what-to-delete)
+  - [Paths](#paths)
   - [Removing](#removing)
   - [Counting](#counting)
   - [Diagnostics and webhooks](#diagnostics-and-webhooks)
+  - [Hook: before the run](#hook-before-the-run-on_started)
+  - [Hook: after a run that went wrong](#hook-after-a-run-that-went-wrong-on_error)
   - [The finished hook](#the-finished-hook-on_finished)
 - [`cleaner::registry`](#cleanerregistry-windows)
 - [Types](#-types)
@@ -56,9 +60,14 @@ them off, which is what a scheduled run that must not send notifications wants.
    declares could ever be reached.
 3. **Handlers** — a `custom_cleaner` names a function. The cleaning job calls it
    with the expanded path when the user's selection reaches that cleaner.
-4. **`on_finished`** — a handler registered with `cleaner::on_finished(name)` is
-   called once after every real cleaning run, with a [`Report`](#report). Never
-   for a scan or a dry run.
+4. **`on_started`** — a handler registered with `cleaner::on_started(name)` is
+   called once before a real cleaning run starts deleting. Synchronous, so it
+   can close a copy or take a backup while the files are still there. Never for a
+   scan or a dry run.
+5. **`on_finished` / `on_error`** — called once after a real run, with a
+   [`Report`](#report). `on_finished` when the run went clean; `on_error` when it
+   left something behind (a locked file, a denied directory), with the reason as
+   a second argument. Never for a scan or a dry run.
 
 Handlers may be `async` and `.await`. A `custom_cleaner` handler that fails or
 panics counts as having removed nothing and is logged; it never aborts the run.
@@ -111,7 +120,8 @@ Path placeholders, expanded exactly as for the built-in catalog:
 
 | Placeholder | Becomes |
 | --- | --- |
-| `{username}` | The current user's profile directory |
+| `{username}` | The current user's name (`cleaner::user()`) |
+| `{home}` | The current user's home directory (`cleaner::home()`) |
 | `{steam}` | The Steam installation directory |
 | `{drive}` | The system drive, e.g. `C:` |
 
@@ -201,6 +211,68 @@ them; a scan names them as unmeasured instead of promising their bytes.
 `cleaner::read` is the synchronous counterpart of `fs::read_to_string`, which is
 `async` and therefore unusable from a non-`async` handler.
 
+### Deciding what to delete
+
+| Function | Returns | Notes |
+| --- | --- | --- |
+| `cleaner::older_than(path, days)` | `bool` | Modified more than `days` days ago; `false` for a missing path |
+| `cleaner::matches(path, pattern)` | `bool` | The *name* matching a glob, without expanding a pattern |
+| `cleaner::unlocked(path)` | `bool` | Opens the file for writing right now — asks, does not damage |
+| `cleaner::locked(path)` | `bool` | The inverse: another program holds it |
+| `cleaner::lock_files(dir)` | `[String]` | Every file under `dir` that is locked right now |
+
+```rune
+pub fn clean(path) {
+    for entry in cleaner::list(path) {
+        // Only week-old temp files, and only ones nothing is still writing.
+        if cleaner::matches(entry, "*.tmp")
+            && cleaner::older_than(entry, 7)
+            && cleaner::unlocked(entry)
+        {
+            cleaner::remove_file(entry);
+        }
+    }
+}
+```
+
+`lock_files` is for the whole-directory decision — leave the cache alone while
+one file in it is still open, rather than cleaning half of it:
+
+```rune
+let busy = cleaner::lock_files(path);
+
+if busy.is_empty() {
+    cleaner::remove_all(path);
+} else {
+    cleaner::log(`left ${path} alone: ${busy.len()} locked`);
+}
+```
+
+### Paths
+
+| Function | Returns | Notes |
+| --- | --- | --- |
+| `cleaner::user()` | `String` | What `{username}` expands to |
+| `cleaner::home()` | `String` | What `{home}` expands to |
+| `cleaner::appdata()` | `String` | `AppData\Roaming`, `~/.config`, `Application Support` |
+| `cleaner::join([parts])` | `String` | Joined with the platform separator |
+| `cleaner::parent(path)` | `Option<String>` | The containing directory |
+| `cleaner::filename(path)` | `Option<String>` | The last component |
+| `cleaner::expand(pattern)` | `[String]` | The rule-path placeholders, one entry per drive |
+
+`join` takes its pieces, so a handler that still needs its argument clones it:
+`cleaner::join([path.clone(), "cache"])`.
+
+```rune
+pub fn clean(path) {
+    let stamp = cleaner::join([path.clone(), "last-run.txt"]);
+
+    for candidate in cleaner::expand("{drive}/Users/{username}/AppData/Local/My App/tmp") {
+        cleaner::log(candidate);
+    }
+}
+```
+
 ### Removing
 
 Every removal call returns a [`Stats`](#stats) and also adds to the totals of the
@@ -258,6 +330,46 @@ results page are the numbers these calls recorded.
 Prefer these over `println!`: the TUI and the window app own the screen, and
 terminal output from a worker thread tears the frame apart.
 
+### Hook: before the run (`on_started`)
+
+```rune
+pub fn main() {
+    cleaner::on_started("prepare");
+}
+
+pub fn prepare() {
+    // The files are all still there: this is the moment to close a copy,
+    // take a backup, or check that the machine is idle.
+    let marker = cleaner::join([cleaner::appdata(), "..", "Local", "My App", "cleaning.lock"]);
+    cleaner::write(marker, "cleaning");
+}
+```
+
+Synchronous, and called before the first deletion of a real run — a hook that
+takes ten seconds delays the cleaning by ten seconds, which is the point. Never
+for a scan or a dry run.
+
+### Hook: after a run that went wrong (`on_error`)
+
+```rune
+pub fn main() {
+    cleaner::on_error("report_problem");
+}
+
+pub async fn report_problem(report, problem) {
+    // `problem` is a line like "3 files were still in use".
+    let body = json::to_string(#{
+        "text": `${report.summary()} — but: ${problem}`,
+    })?;
+
+    cleaner::http_post("https://example.com/hook", body);
+}
+```
+
+A run that finished but left something behind calls `on_error` *instead of*
+`on_finished`: one message per run, and the one worth sending is the one that
+says something did not go to plan.
+
 ### The finished hook (`on_finished`)
 
 ```rune
@@ -291,9 +403,12 @@ they are no-ops (`false`, `[]`, `None`), so a shared script still loads.
 | --- | --- | --- |
 | `cleaner::registry::exists(path)` | `bool` | |
 | `cleaner::registry::read(path, name)` | `Option<String>` | Text form of the value |
+| `cleaner::registry::read_dword(path, name)` | `Option<u32>` | A `REG_DWORD` as the number it is |
+| `cleaner::registry::read_qword(path, name)` | `Option<u64>` | A `REG_QWORD` as the number it is |
 | `cleaner::registry::write(path, name, data)` | `bool` | Creates the key if needed |
 | `cleaner::registry::values(path)` | `[String]` | Names of the values directly under the key |
-| `cleaner::registry::keys(path)` | `[String]` | Names of the sub-keys, relative to the key |
+| `cleaner::registry::keys(path)` | `[String]` | Names of the sub-keys, one level down |
+| `cleaner::registry::subkeys(path, depth)` | `[String]` | Sub-keys `depth` levels down, parents before children |
 | `cleaner::registry::delete_value(path, name)` | `bool` | |
 | `cleaner::registry::delete_key(path)` | `bool` | The key with everything under it |
 
@@ -301,7 +416,9 @@ they are no-ops (`false`, `[]`, `None`), so a shared script still loads.
 pub fn clean(path) {
     let base = "HKEY_CURRENT_USER\\Software\\My App\\Recent";
 
-    for sub in cleaner::registry::keys(base) {
+    // Every sub-key, three levels down; parents come first, so deleting front
+    // to back never removes a key a later path still needs.
+    for sub in cleaner::registry::subkeys(base, 3) {
         if sub.starts_with("session-") {
             cleaner::registry::delete_key(format!("{}\\{}", base, sub));
         }
@@ -335,6 +452,8 @@ Handed to every `on_finished` handler.
 | `folders` | `u64` | Directories removed in the run |
 | `bytes` | `u64` | Bytes freed in the run |
 | `programs` | `u64` | How many programs contributed |
+| `started_at` | `u64` | When the run started (Unix seconds); `0` if no frontend recorded it |
+| `duration` | `u64` | How long the run took, in seconds; `0` if the start was not recorded |
 | `.entries()` | `[ProgramReport]` | One row per program, largest first |
 | `.summary()` | `String` | One sentence, e.g. `Free 1.2 GB in 3214 files and 87 folders across 12 programs` |
 | `.details()` | `String` | One line per program — ready to drop into a message |

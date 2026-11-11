@@ -69,10 +69,13 @@ pub async fn run_custom_cleaner(
     (cleaner.function)(cleaner, sender).await
 }
 
-/// Expand placeholders: {username}, {drive} (one entry per drive letter).
+/// Expand placeholders: {home}, {username}, {steam}, {drive} (one entry per drive
+/// letter).
 fn expand_placeholders(cleaner: CustomCleaner) -> Vec<CustomCleaner> {
-    let username = whoami::username().expect("Failed to get username");
-    let path = cleaner.path.replace("{username}", &username);
+    let ctx = crate::cleaner_database::expansion();
+    let path = cleaner.path.replace("{home}", &ctx.home);
+    let path = path.replace("{username}", &ctx.username);
+    let path = path.replace("{steam}", &ctx.steam);
 
     if !path.contains("{drive}") {
         return vec![CustomCleaner { path, ..cleaner }];

@@ -33,14 +33,32 @@ pub(crate) struct CustomDefinition {
     pub sequential: bool,
 }
 
+/// When a hook runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HookKind {
+    /// Before the deletions start, once per real run.
+    Started,
+    /// After the run, with the report.
+    Finished,
+    /// After a run that left something behind — denied or locked.
+    Failed,
+}
+
+/// A hook declared by a script.
+#[derive(Debug, Clone)]
+pub(crate) struct HookDefinition {
+    pub kind: HookKind,
+    pub handler: String,
+}
+
 /// Everything the scripts of one directory declared.
 #[derive(Default)]
 pub(crate) struct Collected {
     pub files: Vec<CleanerData>,
     pub registry: Vec<RegistryRule>,
     pub custom: Vec<CustomDefinition>,
-    /// Handler names registered with `cleaner::on_finished`.
-    pub hooks: Vec<String>,
+    /// Handlers registered with `cleaner::on_started` and friends.
+    pub hooks: Vec<HookDefinition>,
     pub errors: Vec<ScriptError>,
     script: Option<PathBuf>,
 }
@@ -120,8 +138,8 @@ pub(crate) fn custom_since(mark: Mark) -> Vec<CustomDefinition> {
     with(|collected| collected.custom[mark.custom..].to_vec()).unwrap_or_default()
 }
 
-/// The finished-run handlers declared after `mark`, in declaration order.
-pub(crate) fn hooks_since(mark: Mark) -> Vec<String> {
+/// The hooks declared after `mark`, in declaration order.
+pub(crate) fn hooks_since(mark: Mark) -> Vec<HookDefinition> {
     with(|collected| collected.hooks[mark.hooks..].to_vec()).unwrap_or_default()
 }
 
@@ -137,8 +155,8 @@ pub(crate) fn custom(definition: CustomDefinition) {
     with(|collected| collected.custom.push(definition));
 }
 
-pub(crate) fn hook(handler: String) {
-    with(|collected| collected.hooks.push(handler));
+pub(crate) fn hook(kind: HookKind, handler: String) {
+    with(|collected| collected.hooks.push(HookDefinition { kind, handler }));
 }
 
 /// Reports a rule a script asked for but that cannot be used.

@@ -19,6 +19,7 @@ use tokio::sync::mpsc::Sender;
 
 use crate::api::{self, RegistryRule, Report};
 use crate::collect;
+use crate::collect::HookKind;
 use crate::registry;
 use crate::remove::{self, Stats};
 
@@ -155,6 +156,55 @@ impl ScriptProgram {
             Ok(())
         })
     }
+
+    /// Runs an `on_started` handler, with no arguments.
+    ///
+    /// Called before the deletions begin, and synchronously: a hook that takes
+    /// five seconds is meant to take five seconds, not to race the cleaning.
+    fn started(&self) -> Result<(), String> {
+        let context = self.context.clone();
+        let unit = self.unit.clone();
+        let handler = self.handler.clone();
+
+        drive(async move {
+            let vm = Vm::new(context, unit);
+            let execution = vm
+                .send_execute([handler.as_str()], ())
+                .map_err(|error| format!("{handler}(): {error}"))?;
+
+            execution
+                .async_complete()
+                .await
+                .into_result()
+                .map_err(|error| format!("{handler}(): {error}"))?;
+
+            Ok(())
+        })
+    }
+
+    /// Runs an `on_error` handler with the report and why the run was not clean.
+    fn failed(&self, report: &Report, problem: &str) -> Result<(), String> {
+        let context = self.context.clone();
+        let unit = self.unit.clone();
+        let handler = self.handler.clone();
+        let report = report.clone();
+        let problem = problem.to_owned();
+
+        drive(async move {
+            let vm = Vm::new(context, unit);
+            let execution = vm
+                .send_execute([handler.as_str()], (report, problem))
+                .map_err(|error| format!("{handler}(): {error}"))?;
+
+            execution
+                .async_complete()
+                .await
+                .into_result()
+                .map_err(|error| format!("{handler}(): {error}"))?;
+
+            Ok(())
+        })
+    }
 }
 
 /// Runs a script future to completion.
@@ -199,9 +249,28 @@ fn programs() -> &'static RwLock<HashMap<String, Arc<ScriptProgram>>> {
     PROGRAMS.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
-fn hooks() -> &'static RwLock<Vec<Arc<ScriptProgram>>> {
-    static HOOKS: OnceLock<RwLock<Vec<Arc<ScriptProgram>>>> = OnceLock::new();
+/// A hook, with the phase it belongs to.
+struct Hook {
+    kind: HookKind,
+    program: Arc<ScriptProgram>,
+}
+
+fn hooks() -> &'static RwLock<Vec<Hook>> {
+    static HOOKS: OnceLock<RwLock<Vec<Hook>>> = OnceLock::new();
     HOOKS.get_or_init(|| RwLock::new(Vec::new()))
+}
+
+/// Snapshot of the hooks of one phase, so a hook cannot deadlock the registry.
+fn hooks_of(kind: HookKind) -> Vec<Arc<ScriptProgram>> {
+    let list = match hooks().read() {
+        Ok(list) => list,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+
+    list.iter()
+        .filter(|hook| hook.kind == kind)
+        .map(|hook| hook.program.clone())
+        .collect()
 }
 
 fn program(key: &str) -> Option<Arc<ScriptProgram>> {
@@ -222,7 +291,9 @@ fn add_program(key: String, program: Arc<ScriptProgram>) {
     }
 }
 
-fn add_hook(hook: Arc<ScriptProgram>) {
+fn add_hook(kind: HookKind, program: Arc<ScriptProgram>) {
+    let hook = Hook { kind, program };
+
     match hooks().write() {
         Ok(mut list) => list.push(hook),
         Err(poisoned) => poisoned.into_inner().push(hook),
@@ -242,7 +313,7 @@ pub fn scripts_dir() -> PathBuf {
 }
 
 /// The platform's per-user data directory.
-fn platform_data_dir() -> PathBuf {
+pub(crate) fn platform_data_dir() -> PathBuf {
     #[cfg(windows)]
     {
         if let Some(appdata) = std::env::var_os("APPDATA") {
@@ -323,6 +394,52 @@ pub fn register_custom_cleaners() {
     }
 }
 
+/// Records that a cleaning run is starting, and runs the `on_started` hooks.
+///
+/// Called by the frontends before the first deletion of a real run — never for a
+/// scan or a dry run. Unlike [`notify_finished`] this is synchronous: a hook here
+/// exists to do something *before* the files go (close a copy, take a backup,
+/// check that the machine is idle), so finishing it quickly is exactly wrong.
+///
+/// The start time it records is what the finished report's `duration` and
+/// `started_at` come from; a frontend that never calls this reports `0` for
+/// both.
+pub fn notify_started() {
+    let hooks = hooks_of(HookKind::Started);
+
+    let now = crate::files::now();
+    let instant = std::time::Instant::now();
+
+    let mut start = match STARTED.lock() {
+        Ok(start) => start,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    *start = Some((now, instant));
+    drop(start);
+
+    for hook in hooks {
+        if let Err(error) = hook.started() {
+            database::diag::warn(format!("started hook: {error}"));
+        }
+    }
+}
+
+/// When the current run started: the wall clock and when it began.
+static STARTED: Mutex<Option<(u64, std::time::Instant)>> = Mutex::new(None);
+
+/// The run's start, or `(0, 0)` when no frontend recorded one.
+fn started() -> (u64, u64) {
+    let start = match STARTED.lock() {
+        Ok(start) => *start,
+        Err(poisoned) => *poisoned.into_inner(),
+    };
+
+    match start {
+        Some((clock, instant)) => (clock, instant.elapsed().as_secs()),
+        None => (0, 0),
+    }
+}
+
 /// Runs the `on_finished` hooks of every loaded script.
 ///
 /// Called by the frontends once a real cleaning run has completed — never for a
@@ -334,19 +451,14 @@ pub fn register_custom_cleaners() {
 /// A frontend that is about to exit calls [`wait_for_hooks`] first, so a short
 /// webhook still gets out instead of dying with the process.
 pub fn notify_finished(bytes: u64, files: u64, folders: u64, cleared: &[Cleared]) {
-    // Hooks only exist if the scripts that declared them were loaded, so a
-    // frontend with scripts disabled needs no separate guard: it never called
-    // `load`, and the list below is empty.
-    let hooks: Vec<Arc<ScriptProgram>> = match hooks().read() {
-        Ok(list) => list.clone(),
-        Err(poisoned) => poisoned.into_inner().clone(),
-    };
+    let hooks = hooks_of(HookKind::Finished);
 
     if hooks.is_empty() {
         return;
     }
 
-    let report = api::report(bytes, files, folders, cleared);
+    let (started_at, duration) = started();
+    let report = api::report(bytes, files, folders, cleared, started_at, duration);
 
     let handle = std::thread::spawn(move || {
         for hook in hooks {
@@ -365,9 +477,44 @@ pub fn notify_finished(bytes: u64, files: u64, folders: u64, cleared: &[Cleared]
     running.push(handle);
 }
 
+/// Runs the `on_error` hooks of every loaded script.
+///
+/// Called instead of [`notify_finished`] when a run finished but left something
+/// behind — a locked file, a denied directory. `problem` is the one-line
+/// explanation the handler receives next to the report, so a monitoring channel
+/// can say what went wrong without parsing totals.
+///
+/// Hooks only exist if the scripts that declared them were loaded: a frontend
+/// with scripts disabled needs no separate guard.
+pub fn notify_failed(bytes: u64, files: u64, folders: u64, cleared: &[Cleared], problem: &str) {
+    let hooks = hooks_of(HookKind::Failed);
+
+    if hooks.is_empty() {
+        return;
+    }
+
+    let (started_at, duration) = started();
+    let report = api::report(bytes, files, folders, cleared, started_at, duration);
+    let problem = problem.to_owned();
+
+    let handle = std::thread::spawn(move || {
+        for hook in hooks {
+            if let Err(error) = hook.failed(&report, &problem) {
+                database::diag::warn(format!("error hook: {error}"));
+            }
+        }
+    });
+
+    let mut running = match HOOK_THREADS.lock() {
+        Ok(running) => running,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    running.push(handle);
+}
+
 static HOOK_THREADS: Mutex<Vec<std::thread::JoinHandle<()>>> = Mutex::new(Vec::new());
 
-/// How many `on_finished` hooks the loaded scripts registered.
+/// How many hooks the loaded scripts registered, of every phase.
 ///
 /// For diagnostics and tests: the hooks are global rather than part of
 /// [`Scripts`], because a script declares them in `main` and they outlive the
@@ -487,13 +634,16 @@ fn build(directory: PathBuf) -> Scripts {
                         .push(api::custom_to_database(key, definition));
                 }
 
-                for handler in collect::hooks_since(mark) {
-                    add_hook(Arc::new(ScriptProgram {
-                        context: runtime.clone(),
-                        unit: unit.clone(),
-                        handler,
-                        glob: false,
-                    }));
+                for hook in collect::hooks_since(mark) {
+                    add_hook(
+                        hook.kind,
+                        Arc::new(ScriptProgram {
+                            context: runtime.clone(),
+                            unit: unit.clone(),
+                            handler: hook.handler,
+                            glob: false,
+                        }),
+                    );
                 }
             }
             Err(error) => {

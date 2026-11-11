@@ -11,17 +11,27 @@ use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
 /// Cached, OS-specific values used to expand placeholders in database paths.
-struct ExpansionContext {
-    username: String,
-    drives: Vec<String>,
-    steam: String,
+pub(crate) struct ExpansionContext {
+    pub(crate) username: String,
+    pub(crate) home: String,
+    pub(crate) drives: Vec<String>,
+    pub(crate) steam: String,
 }
 
-fn expansion() -> &'static ExpansionContext {
+pub(crate) fn expansion() -> &'static ExpansionContext {
     static CTX: OnceLock<ExpansionContext> = OnceLock::new();
     CTX.get_or_init(|| {
         // INFO: Get the username
         let username = whoami::username().expect("Failed to get username");
+
+        // INFO: The user's home directory, which is what {home} expands to.
+        // WARN: Read from the environment: whoami 2.x dropped `home_dir`, and
+        // this is the same value every frontend already uses for its config.
+        let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+            .map(PathBuf::from)
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
 
         // INFO: Getting a list of disks
         // WARN: Windows only
@@ -37,15 +47,55 @@ fn expansion() -> &'static ExpansionContext {
 
         ExpansionContext {
             username,
+            home,
             drives,
             steam,
         }
     })
 }
 
+/// The value `{username}` expands to: the current user's name, without the
+/// profile directory around it.
+pub fn placeholder_username() -> String {
+    expansion().username.clone()
+}
+
+/// The value `{home}` expands to: the current user's home directory.
+pub fn placeholder_home() -> String {
+    expansion().home.clone()
+}
+
+/// Expands `{home}`, `{username}`, `{steam}` and `{drive}` in a path exactly the
+/// way the cleaning database does, returning one path per drive when `{drive}`
+/// is present.
+///
+/// This is the same expansion a rule declared in a script goes through, so a
+/// handler that computes a sibling path by hand gets the same answer as the
+/// engine would.
+pub fn expand_path(path: &str) -> Vec<String> {
+    let ctx = expansion();
+
+    let path = path.replace("{home}", &ctx.home);
+    let path = path.replace("{username}", &ctx.username);
+    let path = path.replace("{steam}", &ctx.steam);
+
+    // WARN: Windows only, mirroring `expand_into`: elsewhere a {drive} path is
+    // handed back untouched rather than silently dropped.
+    if cfg!(windows) && path.contains("{drive}") {
+        return ctx
+            .drives
+            .iter()
+            .map(|drive| path.replace("{drive}", drive))
+            .collect();
+    }
+
+    vec![path]
+}
+
 /// Expand {username}, {steam} and {drive} in an owned entry, invoking `f` for
 /// each resulting entry ({drive} yields one entry per drive letter).
 fn expand_into<F: FnMut(CleanerData)>(mut entry: CleanerData, ctx: &ExpansionContext, f: &mut F) {
+    entry.path = entry.path.replace("{home}", &ctx.home);
     entry.path = entry.path.replace("{username}", &ctx.username);
     entry.path = entry.path.replace("{steam}", &ctx.steam);
 

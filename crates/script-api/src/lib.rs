@@ -19,8 +19,14 @@
 //! * `custom_cleaner` — a path plus a handler that decides what to delete and
 //!   reports how much it deleted.
 //!
-//! Plus `on_finished`, which runs a handler after a real cleaning run with a
-//! per-program report of what was freed.
+//! Plus three hooks, so a script can also react to a run:
+//!
+//! * `on_started` — before the first deletion, synchronously (close a copy, take
+//!   a backup, check that the machine is idle);
+//! * `on_finished` — after a real run, with a per-program report of what was
+//!   freed;
+//! * `on_error` — after a run that left something behind, with the report and
+//!   the reason.
 //!
 //! # A complete script
 //!
@@ -115,6 +121,6 @@ pub use api::RegistryRule;
 #[cfg(windows)]
 pub use loader::with_registry_scripts;
 pub use loader::{
-    ScriptError, Scripts, finished_hooks, load, load_from, notify_finished,
-    register_custom_cleaners, scripts_dir, wait_for_hooks, with_scripts,
+    ScriptError, Scripts, finished_hooks, load, load_from, notify_failed, notify_finished,
+    notify_started, register_custom_cleaners, scripts_dir, wait_for_hooks, with_scripts,
 };
