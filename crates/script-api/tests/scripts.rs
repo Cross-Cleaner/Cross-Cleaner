@@ -154,6 +154,125 @@ fn a_custom_cleaner_reports_what_it_removed() {
 }
 
 #[test]
+fn a_glob_cleaner_counts_every_path_it_was_handed() {
+    let _guard = lock();
+    let dir = tempfile::tempdir().unwrap();
+    let cache = dir.path().join("cache");
+
+    fs::create_dir_all(cache.join("a")).unwrap();
+    fs::create_dir_all(cache.join("b")).unwrap();
+    fs::write(cache.join("a").join("one.tmp"), "012").unwrap();
+    fs::write(cache.join("a").join("two.tmp"), "0123").unwrap();
+    fs::write(cache.join("b").join("three.tmp"), "01234").unwrap();
+    fs::write(cache.join("keep.txt"), "keep").unwrap();
+
+    // The host, not the script, expands the pattern: the handler sees one path
+    // per match and every removal it makes belongs to that path's counters.
+    let pattern = format!(
+        "{}/**/*.tmp",
+        cache.display().to_string().replace('\\', "/")
+    );
+
+    let scripts = load(
+        dir.path().join("scripts").as_path(),
+        "glob.rn",
+        &format!(
+            r#"
+            pub fn main() {{
+                cleaner::custom_cleaner("Glob Demo")
+                    .category("Cache")
+                    .path("{pattern}")
+                    .glob()
+                    .handler("clean")
+                    .register();
+            }}
+
+            pub fn clean(path) {{
+                cleaner::remove_file(path);
+            }}
+            "#,
+        ),
+    );
+
+    assert!(scripts.errors.is_empty(), "{:?}", scripts.errors);
+    assert_eq!(scripts.custom.len(), 1);
+
+    let cleaner = scripts.custom[0].clone();
+    let result = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async { (cleaner.function)(&cleaner, None).await });
+
+    assert!(!cache.join("a").join("one.tmp").exists());
+    assert!(!cache.join("a").join("two.tmp").exists());
+    assert!(!cache.join("b").join("three.tmp").exists());
+    assert!(cache.join("keep.txt").exists());
+
+    // Three matches, 12 bytes, and one listed path per match — not one batched
+    // entry, and not a triple-counted one.
+    assert_eq!(result.files, 3);
+    assert_eq!(result.bytes, 12);
+    assert_eq!(result.paths.len(), 3);
+    assert!(result.working);
+}
+
+#[test]
+fn one_failing_path_does_not_stop_the_others() {
+    let _guard = lock();
+    let dir = tempfile::tempdir().unwrap();
+    let cache = dir.path().join("cache");
+
+    fs::create_dir_all(&cache).unwrap();
+    fs::write(cache.join("one.tmp"), "1").unwrap();
+    fs::write(cache.join("boom.tmp"), "2").unwrap();
+    fs::write(cache.join("two.tmp"), "3").unwrap();
+
+    let pattern = format!("{}/*.tmp", cache.display().to_string().replace('\\', "/"));
+
+    let scripts = load(
+        dir.path().join("scripts").as_path(),
+        "boom.rn",
+        &format!(
+            r#"
+            pub fn main() {{
+                cleaner::custom_cleaner("Boom Demo")
+                    .category("Cache")
+                    .path("{pattern}")
+                    .glob()
+                    .handler("clean")
+                    .register();
+            }}
+
+            pub fn clean(path) {{
+                if cleaner::filename(path) == Some("boom.tmp") {{
+                    panic!("boom");
+                }}
+
+                cleaner::remove_file(path);
+            }}
+            "#,
+        ),
+    );
+
+    assert!(scripts.errors.is_empty(), "{:?}", scripts.errors);
+
+    let cleaner = scripts.custom[0].clone();
+    let result = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async { (cleaner.function)(&cleaner, None).await });
+
+    // The panic belongs to `boom.tmp`: the other two are still cleaned and
+    // counted, and the file that panicked is left where it was.
+    assert!(!cache.join("one.tmp").exists());
+    assert!(!cache.join("two.tmp").exists());
+    assert!(cache.join("boom.tmp").exists());
+    assert_eq!(result.files, 2);
+}
+
+#[test]
 fn a_handler_may_await_and_use_std() {
     let _guard = lock();
     let dir = tempfile::tempdir().unwrap();

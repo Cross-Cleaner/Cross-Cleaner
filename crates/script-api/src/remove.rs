@@ -57,12 +57,13 @@ thread_local! {
     /// thread it started on.
     static ACCUMULATED: Cell<Stats> = const { Cell::new(Stats::EMPTY) };
 
-    /// The fence a handler asked for with `within()`, resolved once per call.
+    /// The fence a handler asked for with `within()`.
     ///
     /// `None` in the outer `Option` means no fence at all; `Some(None)` means a
     /// fence was declared but its root could not be resolved, and then every
     /// removal is refused — a fence that silently protects nothing is worse
-    /// than no fence.
+    /// than no fence. Resolved once per cleaner run, since every path that
+    /// cleaner hands the handler shares the same root.
     static WITHIN: std::cell::RefCell<Option<Option<PathBuf>>> =
         const { std::cell::RefCell::new(None) };
 }
@@ -72,20 +73,24 @@ pub(crate) fn reset() {
     ACCUMULATED.with(|cell| cell.set(Stats::EMPTY));
 }
 
-/// Sets the fence for the handler about to run.
+/// Resolves a declared fence root, keeping "declared but unresolvable" distinct
+/// from "not declared".
 ///
-/// The root is canonicalised once, here, rather than per removal: a handler may
-/// call `remove_*` tens of thousands of times, and the root does not change
-/// between them.
-pub(crate) fn set_within(root: Option<&str>) {
-    let resolved = match root {
+/// A cleaner that runs one handler per matched path shares that root across all
+/// of them, so it resolves it once with this and installs it with
+/// [`set_within_resolved`] instead of canonicalising the same directory per path.
+pub(crate) fn resolve_within(root: Option<&str>) -> Option<Option<PathBuf>> {
+    match root {
         None => None,
         // A declared fence whose root cannot be resolved means "remove
         // nothing", not "remove anything": the caller asked for a guarantee.
         Some(root) => Some(fs::canonicalize(root).ok()),
-    };
+    }
+}
 
-    WITHIN.with(|cell| *cell.borrow_mut() = resolved);
+/// Installs a fence [`resolve_within`] has already resolved.
+pub(crate) fn set_within_resolved(fence: Option<Option<PathBuf>>) {
+    WITHIN.with(|cell| *cell.borrow_mut() = fence);
 }
 
 /// Whether `path` may be removed under the current fence.

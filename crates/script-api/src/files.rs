@@ -60,6 +60,12 @@ pub(crate) fn matches(path: &str, pattern: &str) -> bool {
 ///
 /// Also `false` for a missing file and for one the user may not write.
 pub(crate) fn unlocked(path: &str) -> bool {
+    unlocked_path(Path::new(path))
+}
+
+/// [`unlocked`] for a path already in hand, so a walk does not allocate a
+/// `String` per file just to ask the question.
+fn unlocked_path(path: &Path) -> bool {
     fs::OpenOptions::new().write(true).open(path).is_ok()
 }
 
@@ -73,21 +79,12 @@ pub(crate) fn locked(path: &str) -> bool {
 /// What a script uses to leave a whole cache alone while one file in it is
 /// still open, rather than deleting half of it.
 pub(crate) fn lock_files(path: &str) -> Vec<String> {
-    let mut locked_paths: Vec<String> = walk_files(Path::new(path))
-        .into_iter()
-        .filter(|file| locked(&file.to_string_lossy()))
-        .map(|file| file.to_string_lossy().into_owned())
-        .collect();
+    let mut locked_paths = Vec::new();
+    let mut pending = vec![std::path::PathBuf::from(path)];
 
-    locked_paths.sort();
-    locked_paths
-}
-
-/// Every regular file under `directory`, recursively.
-fn walk_files(directory: &Path) -> Vec<std::path::PathBuf> {
-    let mut files = Vec::new();
-    let mut pending = vec![directory.to_path_buf()];
-
+    // Walked in place: building the full file list first would hold one path
+    // for every file under the tree, which for a browser cache is most of the
+    // memory the script uses.
     while let Some(directory) = pending.pop() {
         let Ok(entries) = fs::read_dir(&directory) else {
             continue;
@@ -98,13 +95,14 @@ fn walk_files(directory: &Path) -> Vec<std::path::PathBuf> {
 
             if path.is_dir() {
                 pending.push(path);
-            } else if path.is_file() {
-                files.push(path);
+            } else if path.is_file() && !unlocked_path(&path) {
+                locked_paths.push(path.to_string_lossy().into_owned());
             }
         }
     }
 
-    files
+    locked_paths.sort();
+    locked_paths
 }
 
 /// The current user's name — what `{username}` expands to.

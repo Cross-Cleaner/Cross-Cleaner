@@ -713,8 +713,11 @@ pub async fn notify(report) {
 - **Nothing to clean** — a rule or handler that finds nothing simply contributes
   nothing; it is not an error.
 
-Scripts run inside the application process, on the same thread pool as the
-built-in cleaners. They are not sandboxed: a script can delete what the user can
-delete. Keep globs precise and never widen a pattern "just in case".
+Scripts run inside the application process. A cleaner's handler runs one path at
+a time on one worker thread of its own, so a glob that matches thousands of
+files costs one thread rather than one per file, and a handler that panics on
+one path does not stop the others. Scripts are not sandboxed: a script can
+delete what the user can delete. Keep globs precise and never widen a pattern
+"just in case".
 
 [Rune]: https://rune-rs.github.io/

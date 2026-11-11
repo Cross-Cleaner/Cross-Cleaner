@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::fs;
 use std::future::Future;
+use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -137,40 +138,101 @@ struct ScriptProgram {
 }
 
 impl ScriptProgram {
-    /// Runs the handler for one path and returns what it removed.
-    fn clean(&self, path: &Path) -> Result<Removed, String> {
+    /// Runs the handler for every target of one cleaner and folds what each
+    /// path removed into `result`.
+    ///
+    /// Blocking, so the caller runs it on a blocking thread. One thread and one
+    /// reactor serve the whole cleaner: a glob matched against thousands of
+    /// files would otherwise pay for a thread and a runtime per file — far more
+    /// than the handler itself costs — and the removal counters are thread
+    /// locals, so every path of one cleaner has to run on that one thread.
+    fn clean_all(
+        &self,
+        targets: Vec<PathBuf>,
+        mut result: CleanerResult,
+        sender: Option<Sender<String>>,
+        id: String,
+    ) -> CleanerResult {
+        let handler = self.handler.as_str();
+        let script = self.script.as_str();
         let context = self.context.clone();
         let unit = self.unit.clone();
-        let handler = self.handler.clone();
-        let within = self.within.clone();
-        let path = path.to_string_lossy().into_owned();
-        let script = self.script.clone();
+        let total = targets.len();
 
-        drive(async move {
-            remove::reset();
-            remove::set_within(within.as_deref());
-            registry::reset();
-            crate::session::set_running_script(&script);
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                database::diag::warn(format!("{id}: cannot start the script runtime: {error}"));
+                return result;
+            }
+        };
 
-            let vm = Vm::new(context, unit);
-            let execution = vm
-                .send_execute([handler.as_str()], (path,))
-                .map_err(|error| format!("{handler}(): {error}"))?;
+        // One root for every path this cleaner hands the handler, so it is
+        // resolved once rather than canonicalised per path.
+        remove::set_within_resolved(remove::resolve_within(self.within.as_deref()));
 
-            // The handler's return value is deliberately ignored: what it
-            // removed is what the removal calls — or `cleaner::track` — really
-            // counted, which a script cannot overstate by returning a number.
-            execution
-                .async_complete()
-                .await
-                .into_result()
-                .map_err(|error| format!("{handler}(): {error}"))?;
+        // A panic that somehow escapes a path's own guard must not unwind out of
+        // the blocking pool and take the counts with it.
+        let _ = panic::catch_unwind(AssertUnwindSafe(|| {
+            for (index, target) in targets.into_iter().enumerate() {
+                let path = target.to_string_lossy().into_owned();
 
-            Ok(Removed {
-                stats: remove::take(),
-                registry: registry::take(),
-            })
-        })
+                // One path that panics is a failure of that path, not of the
+                // cleaner: the rest of the tree is still worth cleaning.
+                let removed = panic::catch_unwind(AssertUnwindSafe(|| {
+                    runtime.block_on(async {
+                        remove::reset();
+                        registry::reset();
+                        crate::session::set_running_script(script);
+
+                        let vm = Vm::new(context.clone(), unit.clone());
+                        let execution = vm
+                            .send_execute([handler], (path,))
+                            .map_err(|error| format!("{handler}(): {error}"))?;
+
+                        // The handler's return value is deliberately ignored:
+                        // what it removed is what the removal calls — or
+                        // `cleaner::track` — really counted, which a script
+                        // cannot overstate by returning a number.
+                        execution
+                            .async_complete()
+                            .await
+                            .into_result()
+                            .map_err(|error| format!("{handler}(): {error}"))?;
+
+                        Ok(Removed {
+                            stats: remove::take(),
+                            registry: registry::take(),
+                        })
+                    })
+                }))
+                .unwrap_or_else(|_| Err(format!("the {handler}() handler panicked")));
+
+                match removed {
+                    Ok(removed) => {
+                        record(&mut result, &target, removed.stats);
+                        record_registry(&mut result, removed.registry);
+                    }
+                    Err(message) => database::diag::warn(format!("{id}: {message}")),
+                }
+
+                if index % 5 == 0
+                    && let Some(sender) = &sender
+                {
+                    let _ = sender.try_send(format!(
+                        "Cleaning {}/{} paths... {}",
+                        index + 1,
+                        total,
+                        database::utils::get_file_size_string(result.bytes)
+                    ));
+                }
+            }
+        }));
+
+        result
     }
 
     /// Runs an `on_finished` handler with the report of a finished run.
@@ -631,6 +693,15 @@ fn build(directory: PathBuf) -> Scripts {
         return scripts;
     }
 
+    let files = script_files(&directory);
+
+    // Nothing to load: do not build the Rune context at all. It carries every
+    // module the scripts may use and costs several megabytes, which a user who
+    // writes no scripts should not pay on every run.
+    if files.is_empty() {
+        return scripts;
+    }
+
     let context = match api::context() {
         Ok(context) => context,
         Err(error) => {
@@ -655,7 +726,7 @@ fn build(directory: PathBuf) -> Scripts {
 
     collect::begin();
 
-    for path in script_files(&directory) {
+    for path in files {
         collect::set_script(&path);
         let mark = collect::mark();
         let errors_before = scripts.errors.len();
@@ -833,27 +904,7 @@ pub(crate) fn script_entry(
     let data = data.clone();
 
     Box::pin(async move {
-        let mut result = CleanerResult {
-            files: 0,
-            folders: 0,
-            bytes: 0,
-            working: false,
-            path: data.path.clone(),
-            paths: Vec::new(),
-            paths_omitted: 0,
-            program: data.program.clone(),
-            category: data.category.clone(),
-            sub_category: data.sub_category.clone(),
-            // A script cleaner runs arbitrary code, so nothing can be measured
-            // ahead of it: a scan cannot walk it. These stay zero, the same way
-            // they do for the built-in custom cleaners.
-            locked_files: 0,
-            locked_bytes: 0,
-            locked: Vec::new(),
-            denied_files: 0,
-            denied_bytes: 0,
-            denied: Vec::new(),
-        };
+        let result = blank_result(&data);
 
         let Some(key) = data.args.first().cloned() else {
             database::diag::warn(format!("{}: script cleaner has no program", data.id));
@@ -882,46 +933,52 @@ pub(crate) fn script_entry(
             vec![PathBuf::from(&pattern)]
         };
 
-        let total = targets.len();
-
-        for (index, target) in targets.iter().enumerate() {
-            // The handler runs on a blocking thread: a script may wait on a
-            // file, a process or a network call, and that must not stall the
-            // runtime driving every other cleaner.
-            let removed = {
-                let program = program.clone();
-                let target = target.clone();
-
-                match tokio::task::spawn_blocking(move || program.clean(&target)).await {
-                    Ok(result) => result,
-                    Err(error) => Err(format!("the cleaner task failed: {error}")),
-                }
-            };
-
-            match removed {
-                Ok(removed) => {
-                    record(&mut result, target, removed.stats);
-                    record_registry(&mut result, removed.registry);
-                }
-                Err(message) => database::diag::warn(format!("{}: {message}", data.id)),
+        // The whole cleaner runs on one blocking thread: see `clean_all`. The
+        // fallback is only for a blocking task that never ran — the app shutting
+        // down mid-clean — where nothing was removed anyway.
+        let fallback = blank_result(&data);
+        let id = data.id.clone();
+        let mut result = match tokio::task::spawn_blocking(move || {
+            program.clean_all(targets, result, sender, id)
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                database::diag::warn(format!("{}: the cleaner task failed: {error}", data.id));
+                fallback
             }
-
-            if index % 5 == 0
-                && let Some(sender) = &sender
-            {
-                let _ = sender.try_send(format!(
-                    "Cleaning {}/{} paths... {}",
-                    index + 1,
-                    total,
-                    database::utils::get_file_size_string(result.bytes)
-                ));
-            }
-        }
+        };
 
         result.working = result.files > 0 || result.folders > 0 || !result.paths.is_empty();
 
         result
     })
+}
+
+/// An empty result for a cleaner that has not removed anything yet.
+fn blank_result(data: &CustomCleaner) -> CleanerResult {
+    CleanerResult {
+        files: 0,
+        folders: 0,
+        bytes: 0,
+        working: false,
+        path: data.path.clone(),
+        paths: Vec::new(),
+        paths_omitted: 0,
+        program: data.program.clone(),
+        category: data.category.clone(),
+        sub_category: data.sub_category.clone(),
+        // A script cleaner runs arbitrary code, so nothing can be measured
+        // ahead of it: a scan cannot walk it. These stay zero, the same way
+        // they do for the built-in custom cleaners.
+        locked_files: 0,
+        locked_bytes: 0,
+        locked: Vec::new(),
+        denied_files: 0,
+        denied_bytes: 0,
+        denied: Vec::new(),
+    }
 }
 
 /// Folds one path's removals into the result.
