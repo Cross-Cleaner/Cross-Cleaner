@@ -20,7 +20,6 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use database::cleaner_database::CleanerDatabase;
-use database::get_version;
 #[cfg(windows)]
 use database::registry_database::RegistryDatabase;
 use database::structures::CustomCleaner;
