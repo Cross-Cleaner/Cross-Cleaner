@@ -31,6 +31,9 @@ pub(crate) struct CustomDefinition {
     pub handler: String,
     pub glob: bool,
     pub sequential: bool,
+    /// Fence for every removal the handler makes. `None` means the handler is
+    /// not fenced, which is what a script that does not call `within()` gets.
+    pub within: Option<String>,
 }
 
 /// When a hook runs.
@@ -74,6 +77,7 @@ pub(crate) struct Mark {
     pub registry: usize,
     pub custom: usize,
     pub hooks: usize,
+    pub errors: usize,
 }
 
 static COLLECTOR: Mutex<Option<Collected>> = Mutex::new(None);
@@ -114,11 +118,17 @@ pub(crate) fn set_script(path: &std::path::Path) {
 }
 
 pub(crate) fn mark() -> Mark {
+    counts()
+}
+
+/// What the collector holds now, in the same shape as a [`Mark`].
+pub(crate) fn counts() -> Mark {
     with(|collected| Mark {
         files: collected.files.len(),
         registry: collected.registry.len(),
         custom: collected.custom.len(),
         hooks: collected.hooks.len(),
+        errors: collected.errors.len(),
     })
     .unwrap_or_default()
 }

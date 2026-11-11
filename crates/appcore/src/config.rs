@@ -12,6 +12,13 @@ pub struct AppConfig {
     pub click_volume: f32,
     pub check_volume: f32,
     pub done_volume: f32,
+    /// Whether user scripts may run programs of their own (`process::Command`).
+    ///
+    /// Off by default: a script that shells out deletes outside everything the
+    /// cleaning engine counts, so it is a choice the user makes, not one a
+    /// script makes for them.
+    #[serde(default)]
+    pub scripts_allow_process: bool,
 }
 
 impl Default for AppConfig {
@@ -21,6 +28,7 @@ impl Default for AppConfig {
             click_volume: 1.0,
             check_volume: 1.0,
             done_volume: 1.0,
+            scripts_allow_process: false,
         }
     }
 }

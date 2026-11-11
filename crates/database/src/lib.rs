@@ -170,6 +170,7 @@ mod tests {
             flags: crate::structures::CleanerFlags::REMOVE_DIRECTORY_AFTER_CLEAN
                 | crate::structures::CleanerFlags::REMOVE_DIRECTORIES
                 | crate::structures::CleanerFlags::REMOVE_FILES,
+            filter: Default::default(),
         };
 
         assert_eq!(data.path, "test/path");
@@ -416,6 +417,7 @@ mod tests {
                 files_to_remove: vec![],
                 directories_to_remove: vec![],
                 flags: crate::structures::CleanerFlags::empty(),
+                filter: Default::default(),
             };
             let json = serde_json::to_string(&data).unwrap();
             let back: CleanerData = serde_json::from_str(&json).unwrap();
@@ -546,6 +548,7 @@ mod tests {
             files_to_remove: vec![],
             directories_to_remove: vec![],
             flags: crate::structures::CleanerFlags::empty(),
+            filter: Default::default(),
         };
 
         assert!(

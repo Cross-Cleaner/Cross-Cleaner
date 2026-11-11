@@ -30,7 +30,7 @@ crates/
   database/                 Cleaning database: structures, parsing, registry
                             support and the platform JSON catalogs
   cli/                      Command-line edition (categories / programs /
-                            plan / clean / update)
+                            scripts / plan / clean / update)
   tui/                      Terminal UI edition
   gui/                      GUI toolkit code (app, config, taskbar,
                             notifications, theming)

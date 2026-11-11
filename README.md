@@ -93,6 +93,7 @@ instant. That is the price of an honest number.
 | `cli programs [-c CAT]` | Programs of the selected categories, with a search filter |
 | `cli plan [selection]` | Which database patterns a selection covers, with `--paths` |
 | `cli clean [selection]` | Clean it, or measure it with `--dry-run` |
+| `cli scripts [--check]` | What each user script declared, and why one did not load |
 | `cli update` | Check for and install a newer release |
 
 Common flags: `-a/--all`, `-c/--category`, `-x/--exclude-category`,
@@ -168,24 +169,29 @@ What a script can reach:
 
 | | |
 |---|---|
-| `cleaner::file_cleaner(..)` | Declarative paths, globs and whole folders |
+| `cleaner::file_cleaner(..)` | Declarative paths, globs and whole folders; narrow them with `older_than`, `exclude`, `max_depth`, `skip_if_running`, `to_trash` |
 | `cleaner::registry_cleaner(..)` | Declarative registry keys and values (Windows) |
-| `cleaner::custom_cleaner(..)` | A path plus your own handler |
+| `cleaner::custom_cleaner(..)` | A path plus your own handler; `within(..)` fences what it may delete |
 | `cleaner::glob`, `list`, `is_file`, `modified`, `now` | Look before you delete |
+| `cleaner::older_than`, `matches`, `locked`, `lock_files` | Decide file by file, not by pattern |
 | `cleaner::remove_file`, `remove_files`, `remove_all` | Delete, and count what went |
-| `cleaner::registry::{read, values, keys, delete_key, ..}` | Inspect and prune the registry (Windows) |
-| `cleaner::on_finished(handler)` | Report the run: bytes, files, folders, per program |
+| `cleaner::registry::{read, values_full, export, backup, ..}` | Inspect, save and prune the registry (Windows) |
+| `cleaner::on_started`, `on_error`, `on_finished` | Prepare, report a run that went wrong, report the run |
+| `cleaner::cancelled`, `progress`, `dry_run`, `notify` | Talk to the run that is happening |
 | `cleaner::http_get`, `http_post`, `log`, `warn` | Webhooks and diagnostics |
 
 Rune's `std` (strings, iterators, `Option`, `Result`, `format!`, `std::io`,
-`std::fmt`) is available, plus the [rune-modules] `fs`, `json`, `rand`, `time`
-and `process` modules. It is Rust-*like*, not Rust: no raw strings, no traits,
-and backtick template literals interpolate with `${...}`.
+`std::fmt`) is available, plus the [rune-modules] `fs`, `json`, `rand` and
+`time` modules. `process` is there too but is opt-in (`scripts_allow_process =
+true` or `CROSS_CLEANER_SCRIPTS_PROCESS=1`): a handler that shells out deletes
+outside everything the engine counts. It is Rust-*like*, not Rust: no raw
+strings, no traits, and backtick template literals interpolate with `${...}`.
 
 A script that fails to compile, or whose `main` panics, is reported and skipped
 without touching the databases it had half-registered; the others keep working.
-`cli --no-scripts true` (and `--no-scripts` in the apps' config) turns them off
-entirely, including the `on_finished` hooks.
+`cli scripts` lists what each file contributed and why the broken ones did not
+load. `cli --no-scripts true` (and `--no-scripts` in the apps' config) turns
+them off entirely, including the hooks.
 
 [rune-modules]: https://docs.rs/rune-modules
 

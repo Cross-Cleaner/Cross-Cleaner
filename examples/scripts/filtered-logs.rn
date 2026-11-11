@@ -1,0 +1,27 @@
+// One rule, several paths, and every filter the engine applies for you.
+//
+// The point of a filter over a handler is that the engine walks the tree, so
+// `--dry-run` measures the rule exactly as it will clean it.
+
+pub fn main() {
+    cleaner::file_cleaner("My App")
+        .category("Logs")
+        .path("{username}/AppData/Local/My App/logs")
+        // The crash dumps are the same kind of junk, so they are the same rule.
+        .paths([
+            "{username}/AppData/Local/My App/crash",
+            "{username}/AppData/Local/My App/dumps",
+        ])
+        // The user's own notes live in the same folder; never touch them.
+        .exclude(["notes", "*.lock", "keep.txt"])
+        // A week is enough for a log that would be rotated anyway.
+        .older_than(7)
+        // Do not go spelunking: the layout below depth 3 is not ours.
+        .max_depth(3)
+        // Cleaning the cache of a running app only makes it write it again.
+        .skip_if_running(["my-app.exe"])
+        // The user's own data goes to the recycle bin, not into the void.
+        .to_trash()
+        .remove_all_in_dir()
+        .register();
+}

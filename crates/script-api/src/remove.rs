@@ -56,11 +56,89 @@ thread_local! {
     /// completes without ever awaiting, so it always runs to the end on the
     /// thread it started on.
     static ACCUMULATED: Cell<Stats> = const { Cell::new(Stats::EMPTY) };
+
+    /// The fence a handler asked for with `within()`, resolved once per call.
+    ///
+    /// `None` in the outer `Option` means no fence at all; `Some(None)` means a
+    /// fence was declared but its root could not be resolved, and then every
+    /// removal is refused — a fence that silently protects nothing is worse
+    /// than no fence.
+    static WITHIN: std::cell::RefCell<Option<Option<PathBuf>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// Forgets what a previous call counted.
 pub(crate) fn reset() {
     ACCUMULATED.with(|cell| cell.set(Stats::EMPTY));
+}
+
+/// Sets the fence for the handler about to run.
+///
+/// The root is canonicalised once, here, rather than per removal: a handler may
+/// call `remove_*` tens of thousands of times, and the root does not change
+/// between them.
+pub(crate) fn set_within(root: Option<&str>) {
+    let resolved = match root {
+        None => None,
+        // A declared fence whose root cannot be resolved means "remove
+        // nothing", not "remove anything": the caller asked for a guarantee.
+        Some(root) => Some(fs::canonicalize(root).ok()),
+    };
+
+    WITHIN.with(|cell| *cell.borrow_mut() = resolved);
+}
+
+/// Whether `path` may be removed under the current fence.
+///
+/// A path is allowed when it is inside the canonical root. `..` is resolved by
+/// canonicalising the parent, which also catches a path that leaves the root
+/// through a chain of links: the fence is about where the bytes are, not how the
+/// path is spelled.
+fn permitted(path: &Path) -> bool {
+    WITHIN.with(|cell| {
+        let borrowed = cell.borrow();
+
+        let Some(fence) = borrowed.as_ref() else {
+            return true;
+        };
+
+        let Some(root) = fence else {
+            return false;
+        };
+
+        let Ok(resolved) = fs::canonicalize(path) else {
+            // The path is gone or unreadable; nothing will be removed from it
+            // either, so answering "no" changes nothing and keeps the fence
+            // from being bypassed by a path that does not exist yet.
+            return false;
+        };
+
+        resolved.starts_with(root)
+    })
+}
+
+/// Whether `path` is a directory that lives inside the fence, so its contents
+/// can be walked. A reparse point is never descended into.
+fn inside_fence(path: &Path) -> bool {
+    WITHIN.with(|cell| match cell.borrow().as_ref() {
+        None => true,
+        Some(None) => false,
+        Some(Some(root)) => match fs::canonicalize(path) {
+            Ok(resolved) => resolved.starts_with(root),
+            Err(_) => false,
+        },
+    })
+}
+
+/// Reports a removal the fence stopped, so a silent `Stats::EMPTY` does not read
+/// as "there was nothing to remove".
+fn denied(path: &Path) -> Stats {
+    database::diag::warn(format!(
+        "script: refused to remove {} because it is outside the within() fence",
+        path.display()
+    ));
+
+    Stats::EMPTY
 }
 
 /// What has been removed since [`reset`].
@@ -94,6 +172,10 @@ fn add(stats: Stats) {
 pub(crate) fn remove_all(path: &str) -> Stats {
     let mut stats = Stats::EMPTY;
 
+    if !permitted(Path::new(path)) {
+        return denied(Path::new(path));
+    }
+
     if let Ok(entries) = fs::read_dir(path) {
         for entry in entries.flatten() {
             stats += remove_entry(&entry.path());
@@ -109,6 +191,11 @@ pub(crate) fn remove_files(path: &str, pattern: &str) -> Stats {
     let mut stats = Stats::EMPTY;
 
     for candidate in expand(path, pattern) {
+        if !permitted(&candidate) {
+            denied(&candidate);
+            continue;
+        }
+
         let Ok(meta) = fs::symlink_metadata(&candidate) else {
             continue;
         };
@@ -138,6 +225,11 @@ pub(crate) fn remove_directories(path: &str, pattern: &str) -> Stats {
     let mut stats = Stats::EMPTY;
 
     for candidate in expand(path, pattern) {
+        if !permitted(&candidate) {
+            denied(&candidate);
+            continue;
+        }
+
         match fs::symlink_metadata(&candidate) {
             Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {
                 stats += remove_directory_tree(&candidate);
@@ -153,6 +245,10 @@ pub(crate) fn remove_directories(path: &str, pattern: &str) -> Stats {
 /// Removes one file.
 pub(crate) fn remove_file(path: &str) -> Stats {
     let mut stats = Stats::EMPTY;
+
+    if !permitted(Path::new(path)) {
+        return denied(Path::new(path));
+    }
 
     if let Ok(meta) = fs::symlink_metadata(path)
         && !meta.is_dir()
@@ -171,6 +267,10 @@ pub(crate) fn remove_file(path: &str) -> Stats {
 
 /// Removes one directory with everything inside it.
 pub(crate) fn remove_directory(path: &str) -> Stats {
+    if !permitted(Path::new(path)) {
+        return denied(Path::new(path));
+    }
+
     let stats = match fs::symlink_metadata(path) {
         Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {
             remove_directory_tree(Path::new(path))
@@ -223,6 +323,10 @@ pub(crate) fn exists(path: &str) -> bool {
 }
 
 fn remove_entry(path: &Path) -> Stats {
+    if !permitted(path) {
+        return denied(path);
+    }
+
     let Ok(meta) = fs::symlink_metadata(path) else {
         return Stats::EMPTY;
     };
@@ -242,6 +346,20 @@ fn remove_entry(path: &Path) -> Stats {
     }
 
     if kind.is_dir() {
+        // A directory that is a reparse point can point anywhere; descending
+        // into it would delete outside the fence. Remove the link itself, which
+        // `remove_dir` does without following it, and never its contents.
+        if !inside_fence(path) {
+            return match fs::remove_dir(path) {
+                Ok(()) => Stats {
+                    files: 0,
+                    folders: 1,
+                    bytes: 0,
+                },
+                Err(_) => Stats::EMPTY,
+            };
+        }
+
         return remove_directory_tree(path);
     }
 

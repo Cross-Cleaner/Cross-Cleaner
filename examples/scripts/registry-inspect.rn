@@ -1,0 +1,44 @@
+// The registry, done carefully: read the type before deciding, keep a `.reg`
+// copy the user can restore by double-clicking, and then prune.
+//
+// Runs on Windows; on Linux and macOS every call here answers "nothing found",
+// so a shared script still loads.
+
+pub fn main() {
+    cleaner::custom_cleaner("My App")
+        .category("Registry")
+        .path("HKEY_CURRENT_USER\\Software\\My App\\Cache")
+        // The handler gets the expanded path, which is the key itself.
+        .handler("prune")
+        .register();
+}
+
+pub fn prune(key) {
+    if !cleaner::registry::exists(key) {
+        return;
+    }
+
+    // The type is what decides safety: a counter the app regenerates is fair
+    // game, a string someone typed is not.
+    for value in cleaner::registry::values_full(key) {
+        if value.kind != "REG_DWORD" {
+            cleaner::log(`${value.name} is ${value.kind}, leaving it`);
+            continue;
+        }
+
+        if !value.name.starts_with("cache-") {
+            continue;
+        }
+
+        // One backup per key, written next to the scripts, before the first cut.
+        let copy = cleaner::join([cleaner::appdata(), "registry-backup.reg"]);
+
+        if cleaner::registry::backup(key, copy) {
+            cleaner::registry::delete_value(key, value.name);
+        }
+    }
+
+    // And the same proof for a hand-written value, in case a script has to
+    // seed a setting before the app next starts.
+    cleaner::registry::write_dword(key, "last-clean", cleaner::now());
+}

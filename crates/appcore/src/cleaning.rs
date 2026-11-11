@@ -24,6 +24,7 @@ use tempfile::NamedTempFile;
 use tokio::sync::mpsc;
 
 use crate::categories::effective_sub;
+use script_api::RunTotals;
 
 /// Prefix of the progress counter messages.
 const PROGRESS_PREFIX: &str = "PROGRESS:";
@@ -178,6 +179,11 @@ pub async fn work_with(
     mode: Mode,
 ) -> ScanReport {
     let mut current_task = 0;
+
+    // A run starts uncancelled and says whether it is a preview, before any
+    // handler can ask. Set here, once: a cancel or a preview flag set inside the
+    // run must survive everything that comes after it.
+    script_api::session::begin(!mode.removes());
 
     // Scripts hear about the run before the first deletion, not after it: a
     // started hook is where a script closes a copy or takes a backup, so it has
@@ -407,22 +413,28 @@ pub async fn work_with(
         // *this did not go to plan*.
         let problem = leftover_problem(denied_files, locked_files);
 
+        // The hook receives the same numbers the results page shows, in one
+        // struct, so a script does not have to pick them out of a report to say
+        // "3 GB freed, 2 files still in use".
+        let totals = RunTotals {
+            bytes: bytes_cleared,
+            files: removed_files,
+            folders: removed_directories,
+            locked_files,
+            locked_bytes,
+            denied_files,
+            denied_bytes,
+        };
+
         match problem {
-            Some(problem) => crate::scripts::notify_failed(
-                bytes_cleared,
-                removed_files,
-                removed_directories,
-                &cleared_programs,
-                &problem,
-            ),
-            None => crate::scripts::notify_finished(
-                bytes_cleared,
-                removed_files,
-                removed_directories,
-                &cleared_programs,
-            ),
+            Some(problem) => crate::scripts::notify_failed(totals, &cleared_programs, &problem),
+            None => crate::scripts::notify_finished(totals, &cleared_programs),
         }
     }
+
+    // The run is over, so anything it left cancelled or previewing is stale for
+    // the next one.
+    script_api::session::begin(false);
 
     // Largest first for the same reason: a locked file is the one the user has
     // to act on, and the biggest is the one worth acting on first.
@@ -493,6 +505,7 @@ fn fold(cleared_programs: &mut Vec<Cleared>, result: CleanerResult) -> bool {
                 removed_files: 0,
                 removed_directories: 0,
                 affected_categories: Vec::new(),
+                category_totals: Vec::new(),
                 paths: Vec::new(),
                 paths_omitted: 0,
             });
@@ -506,8 +519,29 @@ fn fold(cleared_programs: &mut Vec<Cleared>, result: CleanerResult) -> bool {
     cleared.removed_directories += result.folders;
     let category = result.category.to_string();
     if !cleared.affected_categories.contains(&category) {
-        cleared.affected_categories.push(category);
+        cleared.affected_categories.push(category.clone());
     }
+    // The category's own share, kept apart from the program totals so a
+    // per-category report adds what was really removed under that heading.
+    let total = match cleared
+        .category_totals
+        .iter_mut()
+        .find(|total| total.category == category)
+    {
+        Some(total) => total,
+        None => {
+            cleared
+                .category_totals
+                .push(database::structures::CategoryTotal {
+                    category: category.clone(),
+                    ..Default::default()
+                });
+            cleared.category_totals.last_mut().expect("just pushed")
+        }
+    };
+    total.files += result.files;
+    total.folders += result.folders;
+    total.bytes += result.bytes;
     // Counted even before the cap: a run that deleted more than the cap holds has
     // to say so, and the count is only true if it includes what was dropped here.
     cleared.paths_omitted += result.paths_omitted;
@@ -544,10 +578,6 @@ fn keep_detail(cleared: &mut Cleared, detail: ClearedPath) {
 /// Shows the desktop notification with the final numbers. Kept out of line
 /// because it owns a temporary icon file for its whole body.
 fn notify_result(bytes_cleared: u64, removed_files: u64, removed_directories: u64) {
-    let mut temp_file = NamedTempFile::new().unwrap();
-    temp_file.write_all(database::ICON_BYTES).unwrap();
-    let icon_path = temp_file.path().to_str().unwrap();
-
     let notification_body = format!(
         "Removed: {}\nFiles: {}\nDirs: {}",
         get_file_size_string(bytes_cleared),
@@ -555,9 +585,22 @@ fn notify_result(bytes_cleared: u64, removed_files: u64, removed_directories: u6
         removed_directories
     );
 
+    show_notification("Cross Cleaner", &notification_body);
+}
+
+/// Shows a desktop notification with the app's icon and name.
+///
+/// This is what both the finished run and `cleaner::notify` from a script use,
+/// so a script's message looks like the app's own instead of a stray toast from
+/// a program the user never started.
+pub fn show_notification(title: &str, body: &str) {
+    let mut temp_file = NamedTempFile::new().unwrap();
+    temp_file.write_all(database::ICON_BYTES).unwrap();
+    let icon_path = temp_file.path().to_str().unwrap();
+
     let notification_result = notify_rust::Notification::new()
-        .summary("Cross Cleaner")
-        .body(&notification_body)
+        .summary(title)
+        .body(body)
         .icon(icon_path)
         .show();
 
@@ -622,6 +665,7 @@ mod tests {
             files_to_remove: vec![],
             directories_to_remove: vec![],
             flags: database::structures::CleanerFlags::REMOVE_FILES,
+            filter: Default::default(),
         }]);
 
         let (tx, _rx) = mpsc::channel(64);

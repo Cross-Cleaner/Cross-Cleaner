@@ -45,6 +45,7 @@ fn entry(category: &str, program: &str, sub: &str) -> CleanerData {
         files_to_remove: vec![],
         directories_to_remove: vec![],
         flags: CleanerFlags::empty(),
+        filter: Default::default(),
     }
 }
 
@@ -333,6 +334,7 @@ fn cleared(program: &str, bytes: u64, paths: &[(&str, u64)]) -> database::struct
         removed_files: paths.len() as u64,
         removed_directories: 0,
         affected_categories: vec!["Cache".to_string()],
+        category_totals: Vec::new(),
         paths: paths
             .iter()
             .map(|(path, bytes)| ClearedPath {
@@ -392,6 +394,7 @@ fn report_row(
         removed_files: files,
         removed_directories: dirs,
         affected_categories: categories.iter().map(|name| (*name).to_string()).collect(),
+        category_totals: Vec::new(),
         paths: vec![ClearedPath {
             path: (*path).into(),
             removed_bytes: bytes,

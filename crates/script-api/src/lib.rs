@@ -116,11 +116,13 @@ mod loader;
 mod registry;
 mod registry_api;
 mod remove;
+pub mod session;
 
-pub use api::RegistryRule;
+pub use api::{RegistryRule, RunTotals};
 #[cfg(windows)]
 pub use loader::with_registry_scripts;
 pub use loader::{
-    ScriptError, Scripts, finished_hooks, load, load_from, notify_failed, notify_finished,
-    notify_started, register_custom_cleaners, scripts_dir, wait_for_hooks, with_scripts,
+    ScriptError, ScriptSummary, Scripts, finished_hooks, load, load_from, notify_failed,
+    notify_finished, notify_started, register_custom_cleaners, scripts_dir, wait_for_hooks,
+    with_scripts,
 };

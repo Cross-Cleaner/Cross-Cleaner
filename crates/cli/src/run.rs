@@ -89,6 +89,11 @@ pub async fn run(
                 // at the next await point, and every removal path in `cleaner`
                 // reaches one.
                 interrupted = true;
+                // Scripts see the same request: a handler that walks a large
+                // tree between two `remove_*` calls stops at its next
+                // `cleaner::cancelled()` instead of running to the end of work
+                // nobody is waiting for.
+                appcore::scripts::cancel();
                 ui.line(&ui.warn("Stopping — the entries in flight finish first."));
                 if let Some(handle) = state.task_handle.take() {
                     handle.abort();
@@ -549,6 +554,7 @@ mod tests {
             files_to_remove: vec![],
             directories_to_remove: vec![],
             flags: CleanerFlags::empty(),
+            filter: Default::default(),
         }
     }
 
@@ -611,6 +617,7 @@ mod tests {
             removed_files: 2,
             removed_directories: 1,
             affected_categories: vec!["Logs".to_string()],
+            category_totals: Vec::new(),
             paths: vec![database::structures::ClearedPath {
                 path: database::structures::SharedPath::new("C:/tmp/Zed.log"),
                 removed_bytes: 65019,
@@ -681,6 +688,7 @@ mod tests {
                 removed_files: 2,
                 removed_directories: 1,
                 affected_categories: vec!["Cache".to_string()],
+                category_totals: Vec::new(),
                 paths: Vec::new(),
                 paths_omitted: 0,
             }],

@@ -51,6 +51,28 @@ Two environment variables are for development and packaging:
 Scripts are enabled everywhere, including `cli`. `cli --no-scripts true` turns
 them off, which is what a scheduled run that must not send notifications wants.
 
+## 🔎 Checking your scripts
+
+A script that does nothing is the hardest kind of bug to find: the cleaner simply
+is not in the list. `cli scripts` answers what loaded and what did not:
+
+```text
+$ cross-cleaner scripts
+2 scripts in C:\Users\me\AppData\Roaming\Cross-Cleaner\Scripts
+  broken.rn 0 file, 0 registry, 0 custom, 0 hooks
+    error: No local variable `nope`
+      1 │ pub fn main() { nope }
+        ·                 ^^^^ No local variable `nope`
+  demo.rn 1 file, 0 registry, 0 custom, 0 hooks
+
+1 script did not load. Nothing they declared is in the list.
+```
+
+The counts are what each file contributed: file rules, registry rules, custom
+cleaners and hooks. `--json` gives the same as one object, for a bug report.
+The exit status is non-zero when a script failed to load, so a wrapper script can
+notice.
+
 ## 🚀 How a script is run
 
 1. **Load** — at startup the file is compiled. A compile error is reported and
@@ -107,7 +129,7 @@ is measurable by `--dry-run`.
 
 ```rune
 cleaner::file_cleaner("My App")        // the program name shown in the lists
-    .category("Cache")                // required in practice: the category it lives in
+    .category("Cache")                // required: the category it lives in
     .sub_category("Images")           // optional: the sub-category row
     .class("Utility")                 // optional: program class, defaults to "Other"
     .path("{username}/AppData/Local/My App/cache")   // required
@@ -115,6 +137,12 @@ cleaner::file_cleaner("My App")        // the program name shown in the lists
     .remove_all_in_dir()              // what to remove (at least one)
     .register();                      // commit it — call last
 ```
+
+The program name here is the same string the built-in catalog uses, so a rule
+for `"Google Chrome"` lands in the existing row instead of creating a second
+one. A rule that names no category, or no path, is rejected with an error naming
+the rule: both are what the user selects it by, so a guess would only make it
+invisible.
 
 Path placeholders, expanded exactly as for the built-in catalog:
 
@@ -138,6 +166,45 @@ What to remove — call any combination:
 
 A rule with nothing to remove is reported as an error instead of being
 registered: a cleaner that cannot delete anything is always a mistake.
+
+#### Narrowing what a rule deletes
+
+The engine applies these on the same walk, so a `--dry-run` measures a narrowed
+rule exactly as the real run would clean it. They are a property of the rule, not
+of the files it happens to find today.
+
+| Method | Effect |
+| --- | --- |
+| `.exclude(["user-data", "*.lock"])` | Skip entries whose *name* matches; a directory keeps everything under it |
+| `.older_than(7)` | Only entries last modified more than 7 days ago |
+| `.min_size("1 MB")` | Only entries at least this large (`"512 KB"`, `"2 GB"`, or a number of bytes) |
+| `.max_size("2 GB")` | Only entries at most this large |
+| `.max_depth(3)` | Stop descending past this level; `1` is the entries directly inside the path |
+| `.skip_if_running(["chrome.exe"])` | Do nothing at all while one of these programs is open |
+| `.to_trash()` | Move entries to the recycle bin instead of deleting, where the platform has one |
+| `.paths([...])` | Additional paths for the same rule; one entry per path, one row in the results |
+
+```rune
+cleaner::file_cleaner("My App")
+    .category("Logs")
+    .path("{username}/AppData/Local/My App/logs")
+    .paths(["{username}/AppData/Local/My App/crash"])
+    .exclude(["keep.txt", "*.lock"])
+    .older_than(30)
+    .max_depth(2)
+    .skip_if_running(["my-app.exe"])
+    .to_trash()
+    .remove_all_in_dir()
+    .register();
+```
+
+`exclude` is matched against the entry name, not the full path, so `"*.lock"`
+works at any depth. `skip_if_running` is the rule that keeps a cache clean while
+the program that owns it is closed — the alternative is a half-cleaned cache the
+program rewrites on its next start.
+
+`to_trash` costs disk space until the user empties the bin, so use it for a
+user's own data and leave system junk to plain deletion.
 
 ### Declarative registry rules (`registry_cleaner`)
 
@@ -173,10 +240,12 @@ cleaner::custom_cleaner("My App")
     .category("Logs")
     .sub_category("Old")
     .path("{username}/AppData/Roaming/My App/logs")  // required
+    .paths(["{username}/AppData/Roaming/My App/crash"])  // optional: more of the same
     .handler("clean_old")        // function name; defaults to "clean"
     .id("my-app-logs")           // optional: the id used to toggle it
     .glob()                      // optional: path is a glob, handler runs per match
     .sequential()                // optional: run it alone instead of in the pool
+    .within("{username}/AppData/Roaming/My App")   // optional: the safe fence, see below
     .os(["windows", "linux"])
     .register();
 
@@ -191,6 +260,32 @@ cannot overstate its result.
 
 `custom_cleaner` handlers cannot be measured by `--dry-run` without running
 them; a scan names them as unmeasured instead of promising their bytes.
+
+#### Fencing a handler with `within`
+
+A handler decides for itself what to delete, which makes a path bug in it the one
+mistake in this API with no undo. `.within(root)` is the answer: every
+`cleaner::remove_*` call in that handler refuses to touch anything outside
+`root`, and a refused path is not counted.
+
+```rune
+cleaner::custom_cleaner("My App")
+    .category("Cache")
+    .path("{username}/AppData/Local/My App/cache")
+    .within("{username}/AppData/Local/My App")
+    .handler("clean")
+    .register();
+
+pub fn clean(path) {
+    // Even if `path` is empty or wrong, nothing outside the App directory goes.
+    cleaner::remove_all(path);
+}
+```
+
+The fence is resolved once, when the script loads, so `..` in a pattern or an
+empty variable cannot move it. Use it for every handler that deletes by
+computed path: it costs one check and turns "a script wiped my drive" into
+"the rule did nothing".
 
 ### Looking around
 
@@ -326,9 +421,44 @@ results page are the numbers these calls recorded.
 | `cleaner::warn(message)` | A warning in the application log |
 | `cleaner::http_get(url)` | `Option<String>` — the body, `None` on any failure |
 | `cleaner::http_post(url, body)` | `bool` — `true` when the server accepted it |
+| `cleaner::notify(title, body)` | `bool` — the app's own desktop notification |
+| `cleaner::progress(text)` | One line in the app's log; the frontends show it as the current step |
+| `cleaner::dry_run()` | `bool` — the run is a scan, not a real one |
+| `cleaner::cancelled()` | `bool` — the user asked the run to stop |
+| `cleaner::is_protected(path)` | `bool` — inside Windows, Program Files, the home root or this app |
+| `cleaner::running(["chrome.exe"])` | `bool` — one of these programs is open |
+| `cleaner::version()` | `String` — the Cross Cleaner version, e.g. `"2.0.4"` |
+| `cleaner::require_api(n)` | Errors unless the API is at least level `n` |
+| `cleaner::script_path()` | `String` — the file this handler runs from |
 
-Prefer these over `println!`: the TUI and the window app own the screen, and
-terminal output from a worker thread tears the frame apart.
+Prefer `notify` over `process` for a desktop notification: it works on every
+platform without the script knowing which one it is.
+
+Prefer `log`/`warn` over `println!` too: the TUI and the window app own the
+screen, and terminal output from a worker thread tears the frame apart.
+
+### A long handler that can be stopped
+
+A handler that loops over 200 000 files has to check whether the user has given
+up, or the window stays busy long after they asked it to stop:
+
+```rune
+pub fn clean(path) {
+    for entry in cleaner::glob(`${path}/**/*.log`) {
+        if cleaner::cancelled() {
+            cleaner::warn("stopped on request");
+            return;
+        }
+
+        cleaner::remove_file(entry);
+    }
+}
+```
+
+`dry_run()` is the other half of the same idea: a handler that runs during
+`--dry-run` should look and report, not delete. Handlers are named as unmeasured
+in a scan, so this only matters for a handler that still wants to say something
+useful about what it would find.
 
 ### Hook: before the run (`on_started`)
 
@@ -406,11 +536,21 @@ they are no-ops (`false`, `[]`, `None`), so a shared script still loads.
 | `cleaner::registry::read_dword(path, name)` | `Option<u32>` | A `REG_DWORD` as the number it is |
 | `cleaner::registry::read_qword(path, name)` | `Option<u64>` | A `REG_QWORD` as the number it is |
 | `cleaner::registry::write(path, name, data)` | `bool` | Creates the key if needed |
+| `cleaner::registry::write_dword(path, name, value)` | `bool` | Writes a `REG_DWORD` |
+| `cleaner::registry::write_binary(path, name, data)` | `bool` | Writes a `REG_BINARY` from bytes |
 | `cleaner::registry::values(path)` | `[String]` | Names of the values directly under the key |
+| `cleaner::registry::values_full(path)` | `[RegistryValue]` | Names *with their type and text* |
 | `cleaner::registry::keys(path)` | `[String]` | Names of the sub-keys, one level down |
 | `cleaner::registry::subkeys(path, depth)` | `[String]` | Sub-keys `depth` levels down, parents before children |
+| `cleaner::registry::export(path)` | `String` | The key and everything under it as a `.reg` file |
+| `cleaner::registry::backup(path, file)` | `bool` | `export` written to `file` |
 | `cleaner::registry::delete_value(path, name)` | `bool` | |
 | `cleaner::registry::delete_key(path)` | `bool` | The key with everything under it |
+
+`values` answers *which* values exist; `values_full` answers what they are, and
+the type is the part that decides whether deleting is safe — a `REG_SZ` is
+usually something a person typed, a `REG_BINARY` may be a license blob, and
+neither is the cache a script set out to clear.
 
 ```rune
 pub fn clean(path) {
@@ -421,6 +561,25 @@ pub fn clean(path) {
     for sub in cleaner::registry::subkeys(base, 3) {
         if sub.starts_with("session-") {
             cleaner::registry::delete_key(format!("{}\\{}", base, sub));
+        }
+    }
+}
+```
+
+Look before deleting, and keep a copy the user can restore by double-clicking:
+
+```rune
+pub fn clean(path) {
+    let base = "HKEY_CURRENT_USER\\Software\\My App\\Cache";
+
+    for value in cleaner::registry::values_full(base) {
+        // Only the counters this app regenerates, never anything typed by hand.
+        if value.kind == "REG_DWORD" && value.name.starts_with("cache-") {
+            let backup = cleaner::join([cleaner::appdata(), "My App", "cache.reg"]);
+
+            if cleaner::registry::backup(base, backup) {
+                cleaner::registry::delete_value(base, value.name);
+            }
         }
     }
 }
@@ -476,6 +635,29 @@ Handed to every `on_finished` handler.
 
 A program cleaned under two categories is one row listing both, not two rows.
 
+### `RegistryValue`
+
+One row of `cleaner::registry::values_full`.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `name` | `String` | The value's name; empty for the default value |
+| `kind` | `String` | The registry type: `"REG_SZ"`, `"REG_DWORD"`, `"REG_BINARY"`, … |
+| `text` | `String` | The number for `REG_DWORD`/`REG_QWORD`, the string itself, `<N bytes>` for binary |
+
+### `Report` totals for a run that left something behind
+
+| Member | Type | Meaning |
+| --- | --- | --- |
+| `locked_files` | `u64` | Files another program still held open |
+| `locked_bytes` | `u64` | What those files would have freed |
+| `denied_files` | `u64` | Files the system refused to delete |
+| `denied_bytes` | `u64` | What those files would have freed |
+| `.incomplete()` | `bool` | Either of the two counts is non-zero |
+
+Read these instead of parsing the reason string an `on_error` handler receives:
+the string is for a message to a person, the numbers are for a decision.
+
 ## 📚 Standard library
 
 Installed for every script:
@@ -487,15 +669,30 @@ Installed for every script:
 | `json` | rune-modules | `json::to_string(value)`, `json::from_string(text)` |
 | `rand` | rune-modules | Random numbers and choices |
 | `time` | rune-modules | `time::sleep(duration).await` |
-| `process` | rune-modules | `process::Command` — run an external program |
+| `process` | rune-modules | `process::Command` — run an external program. **Off by default**, see below |
+
+`process` is the one library that can bypass everything that makes cleaning
+measurable: `process::Command` running `Remove-Item -Recurse` deletes files the
+engine never counted and the user never saw in the plan. It is therefore opt-in,
+through the config file or the environment:
+
+```text
+# config
+scripts_allow_process = true
+
+# or, for one run
+CROSS_CLEANER_SCRIPTS_PROCESS=1 cross-cleaner clean
+```
+
+With it off, a script that mentions `process::Command` fails to load with an
+error saying so — a clear error is better than a handler that silently does
+nothing. With it on, prefer `cleaner::notify` and the `cleaner::remove_*` calls
+for anything they can already do.
 
 ```rune
 pub async fn notify(report) {
     // Give the desktop a notification too, next to the webhook.
-    let mut command = process::Command::new("notify-send");
-    command.arg("Cross Cleaner");
-    command.arg(report.summary());
-    command.status().await?;
+    cleaner::notify("Cross Cleaner", report.summary());
 
     time::sleep(time::Duration::from_secs(1)).await?;
 }

@@ -229,6 +229,13 @@ pub struct Cleared {
     pub removed_files: u64,
     pub removed_directories: u64,
     pub affected_categories: Vec<String>,
+    /// What this program contributed to each category it was cleaned under.
+    ///
+    /// [`Self::removed_bytes`] and friends are the program's totals; a program
+    /// that appears under two categories has one of these rows per category, so
+    /// a per-category report can add them up without splitting the totals by
+    /// guesswork.
+    pub category_totals: Vec<CategoryTotal>,
     /// Every path this program deleted, largest first — what the results page
     /// shows for one row when the user asks where the space went.
     pub paths: Vec<ClearedPath>,
@@ -237,6 +244,15 @@ pub struct Cleared {
     /// bound. Reported next to the list rather than hidden, so a truncated row
     /// never reads as a complete one.
     pub paths_omitted: usize,
+}
+
+/// One program's share of one category, for the per-category report.
+#[derive(PartialEq, Eq, Clone, Debug, Default)]
+pub struct CategoryTotal {
+    pub category: String,
+    pub files: u64,
+    pub folders: u64,
+    pub bytes: u64,
 }
 
 impl PartialEq<Option<Cleared>> for &Cleared {
@@ -276,6 +292,74 @@ impl BoolOrU8 {
     }
 }
 
+// INFO: Selection rules a declarative entry can carry on top of "what to
+// remove": a way to say "not everything, and not all of it".
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CleanerFilter {
+    /// Name globs that are never touched, even when they match what is being
+    /// removed. A directory named by one is skipped with everything inside it.
+    pub exclude: Vec<Arc<str>>,
+    /// Only files modified at least this long ago.
+    pub older_than_seconds: Option<u64>,
+    /// Only files at least this large.
+    pub min_size: Option<u64>,
+    /// Only files at most this large.
+    pub max_size: Option<u64>,
+    /// How deep a directory walk may go, counting the entries directly inside
+    /// the matched path as depth 1.
+    pub max_depth: Option<u32>,
+    /// Process names that must not be running for this entry to run at all.
+    pub skip_if_running: Vec<Arc<str>>,
+    /// Move what is removed to the recycle bin instead of deleting it.
+    pub to_trash: bool,
+}
+
+impl CleanerFilter {
+    /// Whether the filter would keep everything, i.e. whether a walk can take
+    /// the plain delete-everything path.
+    pub fn is_empty(&self) -> bool {
+        self.exclude.is_empty()
+            && self.older_than_seconds.is_none()
+            && self.min_size.is_none()
+            && self.max_size.is_none()
+            && self.max_depth.is_none()
+    }
+
+    /// Whether a file of `size` bytes, last modified at `modified` (Unix
+    /// seconds), `depth` levels down is something this filter wants removed.
+    ///
+    /// `max_depth` is checked by the walk, not here: it is a property of the
+    /// position, not of the file. Everything else is a property of the file.
+    pub fn accepts(&self, size: u64, modified: Option<u64>, now: u64) -> bool {
+        if let Some(max) = self.max_size
+            && size > max
+        {
+            return false;
+        }
+
+        if let Some(min) = self.min_size
+            && size < min
+        {
+            return false;
+        }
+
+        if let Some(age) = self.older_than_seconds {
+            // A file with no readable modification time is left alone: "older
+            // than a week" cannot be proven, and deleting on a guess is exactly
+            // what the filter exists to prevent.
+            let Some(modified) = modified else {
+                return false;
+            };
+
+            if now.saturating_sub(modified) < age {
+                return false;
+            }
+        }
+
+        true
+    }
+}
+
 // INFO: Struct for clearing files and folders
 #[derive(Clone)]
 pub struct CleanerData {
@@ -287,6 +371,8 @@ pub struct CleanerData {
     pub files_to_remove: Vec<Arc<str>>,
     pub directories_to_remove: Vec<Arc<str>>,
     pub flags: CleanerFlags,
+    /// Which of the matched items to actually remove.
+    pub filter: CleanerFilter,
 }
 
 impl CleanerData {
@@ -340,6 +426,21 @@ impl<'de> Deserialize<'de> for CleanerData {
             // new byte flag field
             #[serde(default)]
             flags: Option<u8>,
+            // selection rules
+            #[serde(default)]
+            exclude: Vec<String>,
+            #[serde(default)]
+            older_than_days: Option<u64>,
+            #[serde(default)]
+            min_size: Option<u64>,
+            #[serde(default)]
+            max_size: Option<u64>,
+            #[serde(default)]
+            max_depth: Option<u32>,
+            #[serde(default)]
+            skip_if_running: Vec<String>,
+            #[serde(default)]
+            to_trash: bool,
             // legacy bool fields: accept bool or u8 (byte flag per-field)
             #[serde(default)]
             remove_all_in_dir: Option<BoolOrU8>,
@@ -391,6 +492,17 @@ impl<'de> Deserialize<'de> for CleanerData {
                 .map(|s| intern_arc(&s))
                 .collect(),
             flags: CleanerFlags::from_bits_truncate(bits),
+            filter: CleanerFilter {
+                exclude: h.exclude.iter().map(|s| intern_arc(s)).collect(),
+                older_than_seconds: h
+                    .older_than_days
+                    .map(|days| days.saturating_mul(24 * 60 * 60)),
+                min_size: h.min_size,
+                max_size: h.max_size,
+                max_depth: h.max_depth,
+                skip_if_running: h.skip_if_running.iter().map(|s| intern_arc(s)).collect(),
+                to_trash: h.to_trash,
+            },
         })
     }
 }
@@ -402,7 +514,7 @@ impl CleanerData {
         S: Serializer,
     {
         use serde::ser::SerializeStruct;
-        let mut s = serializer.serialize_struct("CleanerData", 9)?;
+        let mut s = serializer.serialize_struct("CleanerData", 16)?;
         s.serialize_field("path", &self.path)?;
         s.serialize_field("category", &self.category)?;
         s.serialize_field("program", &self.program)?;
@@ -430,6 +542,38 @@ impl CleanerData {
             "remove_files",
             &self.flags.contains(CleanerFlags::REMOVE_FILES),
         )?;
+
+        // Selection rules are written only when they are in use: an entry that
+        // removes everything needs none of them, and a file full of empty
+        // `<exclude/>` elements is harder to read than the data it describes.
+        if !self.filter.exclude.is_empty() {
+            s.serialize_field("exclude", &self.filter.exclude)?;
+        }
+
+        if let Some(days) = self.filter.older_than_seconds {
+            s.serialize_field("older_than_days", &(days / 86_400))?;
+        }
+
+        if let Some(size) = self.filter.min_size {
+            s.serialize_field("min_size", &size)?;
+        }
+
+        if let Some(size) = self.filter.max_size {
+            s.serialize_field("max_size", &size)?;
+        }
+
+        if let Some(depth) = self.filter.max_depth {
+            s.serialize_field("max_depth", &depth)?;
+        }
+
+        if !self.filter.skip_if_running.is_empty() {
+            s.serialize_field("skip_if_running", &self.filter.skip_if_running)?;
+        }
+
+        if self.filter.to_trash {
+            s.serialize_field("to_trash", &true)?;
+        }
+
         s.end()
     }
 }

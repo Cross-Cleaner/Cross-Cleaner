@@ -21,10 +21,17 @@ pub fn module() -> Result<Module, ContextError> {
     module.function_meta(read_qword)?;
     module.function_meta(write)?;
     module.function_meta(values)?;
+    module.function_meta(values_full)?;
+    module.function_meta(export)?;
+    module.function_meta(backup)?;
+    module.function_meta(write_dword)?;
+    module.function_meta(write_binary)?;
     module.function_meta(keys)?;
     module.function_meta(subkeys)?;
     module.function_meta(delete_value)?;
     module.function_meta(delete_key)?;
+
+    module.ty::<Value>()?;
 
     Ok(module)
 }
@@ -114,4 +121,87 @@ fn delete_value(path: &str, name: &str) -> bool {
 #[rune::function]
 fn delete_key(path: &str) -> bool {
     registry::delete_key(path)
+}
+
+/// One value of a key, with the type the registry stores it as.
+///
+/// The type is the part that matters for a delete decision: a `REG_SZ` is
+/// usually a setting someone typed, a `REG_BINARY` may be a license blob, and
+/// neither is the cache a script set out to clear.
+#[derive(Debug, Clone, rune::Any)]
+#[rune(item = ::cleaner::registry)]
+pub struct Value {
+    /// The value's name; the default value has an empty one.
+    #[rune(get)]
+    pub name: String,
+    /// The registry type, e.g. `"REG_DWORD"` or `"REG_SZ"`.
+    #[rune(get)]
+    pub kind: String,
+    /// The value as text: the number for `REG_DWORD`/`REG_QWORD`, the string
+    /// itself for `REG_SZ`, `<N bytes>` for binary data.
+    #[rune(get)]
+    pub text: String,
+}
+
+/// The values with their type.
+///
+/// [`values`] answers *which* values exist; this answers what they are, which
+/// is what a script needs before deciding that a key is disposable.
+///
+/// ```rune
+/// for value in cleaner::registry::values_full(base) {
+///     cleaner::log(`${value.name}: ${value.kind} = ${value.text}`);
+/// }
+/// ```
+#[rune::function]
+fn values_full(path: &str) -> Vec<Value> {
+    registry::values_full(path)
+        .into_iter()
+        .map(|(name, kind, text)| Value { name, kind, text })
+        .collect()
+}
+
+/// The key and everything under it as the text of a `.reg` file.
+///
+/// Empty when the key does not exist. The text is what `regedit` imports, so a
+/// script can save a key before deleting it and tell the user where the file is.
+///
+/// ```rune
+/// let base = "HKEY_CURRENT_USER\\Software\\My App";
+/// let backup = cleaner::join([cleaner::appdata(), "My App", "backup.reg"]);
+///
+/// if cleaner::write(backup, cleaner::registry::export(base)) {
+///     cleaner::registry::delete_key(base);
+/// }
+/// ```
+#[rune::function]
+fn export(path: &str) -> String {
+    registry::export(path)
+}
+
+/// Writes `export(path)` to `file`. `true` on success.
+///
+/// The file is written with [`cleaner::write`](super::write), so a script that
+/// wants the text as well can call `export` itself.
+#[rune::function]
+fn backup(path: &str, file: &str) -> bool {
+    let text = registry::export(path);
+
+    if text.is_empty() {
+        return false;
+    }
+
+    crate::files::write(file, &text)
+}
+
+/// Sets the `REG_DWORD` value `name` to `value`, creating the key if needed.
+#[rune::function]
+fn write_dword(path: &str, name: &str, value: u32) -> bool {
+    registry::write_dword(path, name, value)
+}
+
+/// Sets the `REG_BINARY` value `name` to `bytes`, creating the key if needed.
+#[rune::function]
+fn write_binary(path: &str, name: &str, bytes: Vec<u8>) -> bool {
+    registry::write_binary(path, name, &bytes)
 }

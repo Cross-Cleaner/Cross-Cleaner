@@ -75,6 +75,23 @@ fn execute(cli: Cli) -> Result<ExitCode, String> {
             Ok(ExitCode::SUCCESS)
         }
 
+        Command::Scripts(args) => {
+            if globals.no_scripts {
+                return Err("--no-scripts was passed, so there is nothing to list.".to_string());
+            }
+
+            appcore::scripts::init();
+            let loaded = report::scripts(&ui, &args.output, args.check);
+
+            // A script that did not load is a failure a scheduled job has to be
+            // able to notice, the same way a failed clean is.
+            Ok(if loaded {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            })
+        }
+
         Command::Plan(args) => {
             let mut state = build_state(&globals)?;
             select::apply(&mut state, &args.selection).map_err(|error| error.to_string())?;
@@ -159,6 +176,10 @@ fn clean(ui: &Ui, globals: &Globals, args: CleanArgs) -> Result<ExitCode, String
 /// user-supplied file is validated here rather than at the first entry that
 /// fails to parse.
 fn build_state(globals: &Globals) -> Result<AppState, String> {
+    // Permissions and notification sinks come before any script is compiled:
+    // whether `process` exists is decided at compile time, not at call time.
+    appcore::scripts::init();
+
     cleaner::custom_cleaners::register_all();
 
     // Scripts go in before the custom-cleaner registry is read, or the ones they

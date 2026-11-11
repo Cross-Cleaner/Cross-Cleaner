@@ -156,6 +156,108 @@ pub(crate) fn expand(pattern: &str) -> Vec<String> {
     database::cleaner_database::expand_path(pattern)
 }
 
+/// Whether `path` is a system location a cleaner has no business removing.
+///
+/// This is a question a handler can ask, not a wall: it answers `true` for the
+/// places where a wrong path stops being a bug and becomes a reinstall — the
+/// Windows directory, the program files, the user's home itself, the mount
+/// points of the system — and for anything that contains one of them (removing
+/// `C:\Users` is as bad as removing `C:\Users\me\Documents`).
+///
+/// A path that does not exist is not protected: there is nothing there to lose.
+pub(crate) fn is_protected(path: &str) -> bool {
+    let Ok(resolved) = fs::canonicalize(path) else {
+        return false;
+    };
+
+    protected_roots()
+        .iter()
+        .any(|root| *root == resolved || root.starts_with(&resolved))
+}
+
+/// The places [`is_protected`] treats as off limits, as far as they exist.
+fn protected_roots() -> Vec<std::path::PathBuf> {
+    let mut roots: Vec<std::path::PathBuf> = Vec::new();
+
+    let mut push = |path: std::path::PathBuf| {
+        if let Ok(resolved) = fs::canonicalize(&path)
+            && !roots.contains(&resolved)
+        {
+            roots.push(resolved);
+        }
+    };
+
+    #[cfg(windows)]
+    {
+        for variable in [
+            "SystemRoot",
+            "ProgramFiles",
+            "ProgramFiles(x86)",
+            "ProgramData",
+        ] {
+            if let Some(value) = std::env::var_os(variable) {
+                push(std::path::PathBuf::from(value));
+            }
+        }
+
+        if let Some(drive) = std::env::var_os("SystemDrive") {
+            push(std::path::PathBuf::from(drive).join("\\"));
+        }
+    }
+
+    #[cfg(unix)]
+    {
+        for root in [
+            "/",
+            "/bin",
+            "/boot",
+            "/etc",
+            "/lib",
+            "/lib64",
+            "/opt",
+            "/sbin",
+            "/System",
+            "/Library",
+            "/Applications",
+            "/usr",
+            "/var",
+        ] {
+            push(std::path::PathBuf::from(root));
+        }
+    }
+
+    // The home directory itself, never the things inside it: a cleaner that
+    // targets `{home}/Downloads` is doing its job, one that targets `{home}` is
+    // not.
+    let home = std::path::PathBuf::from(home());
+    push(home.clone());
+
+    // On Windows the home directory sits under `C:\Users`, and removing that is
+    // every account at once.
+    #[cfg(windows)]
+    if let Some(parent) = home.parent()
+        && parent
+            .file_name()
+            .is_some_and(|name| name.eq_ignore_ascii_case("Users"))
+    {
+        push(parent.to_path_buf());
+    }
+
+    // Cross Cleaner's own data directory, where the scripts and their state
+    // live: a script cleaning itself out is never what the user meant.
+    push(crate::loader::platform_data_dir());
+
+    roots
+}
+
+/// Whether any of `programs` is running right now.
+///
+/// The same check a rule's `skip_if_running` makes, so a handler and a rule
+/// agree on what "the browser is open" means. An empty list is `false`.
+pub(crate) fn running(programs: Vec<String>) -> bool {
+    cleaner::processes::running(&programs)
+}
+
 /// Writes `data` to `path`, replacing the file. `true` on success.
 pub(crate) fn write(path: &str, data: &str) -> bool {
     fs::write(path, data).is_ok()

@@ -19,9 +19,43 @@ use database::cleaner_database::CleanerDatabase;
 use database::registry_database::RegistryDatabase;
 
 pub use script_api::{
-    ScriptError, Scripts, notify_failed, notify_finished, notify_started, scripts_dir,
-    wait_for_hooks,
+    RunTotals, ScriptError, ScriptSummary, Scripts, load, load_from, notify_failed,
+    notify_finished, notify_started, scripts_dir, wait_for_hooks,
 };
+
+/// Prepares the script runtime for this process.
+///
+/// Call it once, before any script is loaded. It decides what a script is
+/// allowed to do — `process` is opt-in, because a handler that shells out can
+/// delete anything without going through the cleaning engine — and points the
+/// parts of the API that need a frontend (`progress()` and `notify()`) at the
+/// sinks this build has.
+pub fn init() {
+    script_api::session::allow_process(process_allowed());
+    script_api::session::set_progress_sink(Some(Box::new(|text: &str| {
+        database::diag::info(format!("script: {text}"));
+    })));
+    script_api::session::set_notify_sink(Some(Box::new(|title: &str, body: &str| {
+        crate::cleaning::show_notification(title, body);
+    })));
+}
+
+/// Whether a script may run programs of its own.
+///
+/// Off unless the user turned it on in the config, or set
+/// `CROSS_CLEANER_SCRIPTS_PROCESS=1`. A handler that calls `process::Command`
+/// deletes outside everything the engine counts and every rule the user can
+/// see, so it has to be a deliberate choice rather than a default.
+fn process_allowed() -> bool {
+    if std::env::var_os("CROSS_CLEANER_SCRIPTS_PROCESS").is_some_and(|value| {
+        let value = value.to_string_lossy().to_ascii_lowercase();
+        !matches!(value.as_str(), "" | "0" | "false" | "off" | "no")
+    }) {
+        return true;
+    }
+
+    crate::config::get().scripts_allow_process
+}
 
 /// Layers the rules the user's scripts declared over `database`.
 ///
@@ -48,4 +82,14 @@ pub fn with_registry_rules(database: RegistryDatabase) -> RegistryDatabase {
 /// it once.
 pub fn register_custom_cleaners() {
     script_api::register_custom_cleaners();
+}
+
+/// Asks the running cleaning job, and the scripts taking part in it, to stop.
+///
+/// Cooperative: the job stops starting new cleaners and a handler that checks
+/// `cleaner::cancelled()` returns early. A frontend that can abort the task
+/// outright still should — this is what lets a script be a good citizen, not a
+/// replacement for stopping the job.
+pub fn cancel() {
+    script_api::session::cancel();
 }

@@ -1,5 +1,7 @@
 use database::diag;
-use database::structures::{CleanerData, CleanerFlags, CleanerResult, ClearedPath, SharedPath};
+use database::structures::{
+    CleanerData, CleanerFilter, CleanerFlags, CleanerResult, ClearedPath, SharedPath,
+};
 use futures::stream::{self, StreamExt};
 use glob::glob;
 use std::path::{Component, Path, PathBuf};
@@ -10,6 +12,8 @@ use tokio::sync::Semaphore;
 pub mod custom_cleaners;
 pub mod deletable;
 pub mod image_optimizer;
+pub mod processes;
+pub mod trash;
 
 // INFO: Re-export so macro_rules! ($crate::database::...) resolves in any consumer crate
 pub use database;
@@ -109,6 +113,95 @@ impl Mode {
     }
 }
 
+/// A [`CleanerFilter`] compiled for the walk: the exclude globs parsed once, and
+/// "now" fixed for the whole entry so two files a second apart are judged
+/// against the same clock.
+///
+/// The filter is built per database entry, not per matched path: a glob that
+/// matches ten thousand files would otherwise compile the same pattern ten
+/// thousand times.
+struct Filter {
+    rules: CleanerFilter,
+    exclude: Vec<glob::Pattern>,
+    now: u64,
+}
+
+impl Filter {
+    fn new(rules: &CleanerFilter) -> Self {
+        // An invalid pattern is dropped rather than failing the entry: a typo in
+        // one exclusion must not disable the cleaning it belongs to, and
+        // dropping a pattern only ever makes the entry remove *more* than asked,
+        // which is why it is reported.
+        let exclude = rules
+            .exclude
+            .iter()
+            .filter_map(|pattern| match glob::Pattern::new(pattern) {
+                Ok(compiled) => Some(compiled),
+                Err(e) => {
+                    diag::warn(format!(
+                        "cleaner: ignoring exclude pattern {pattern:?}: {e}"
+                    ));
+                    None
+                }
+            })
+            .collect();
+
+        Self {
+            rules: rules.clone(),
+            exclude,
+            now: trash::unix_now(),
+        }
+    }
+
+    /// Whether the entry removes everything it matches, i.e. whether the walk can
+    /// take the plain delete-everything path.
+    fn is_empty(&self) -> bool {
+        self.rules.is_empty()
+    }
+
+    /// Whether `path` is named by an exclusion.
+    ///
+    /// Both the full path and the bare name are tried, so `cache` protects every
+    /// directory of that name while `*/cache/*` protects a position.
+    fn excluded(&self, path: &Path) -> bool {
+        if self.exclude.is_empty() {
+            return false;
+        }
+
+        let options = glob::MatchOptions {
+            // Windows names are case-insensitive, so a pattern written `Temp`
+            // has to protect `temp` too; elsewhere the case is meaningful.
+            case_sensitive: !cfg!(windows),
+            require_literal_separator: false,
+            require_literal_leading_dot: false,
+        };
+
+        let full = path.to_string_lossy();
+        let name = path.file_name().map(|n| n.to_string_lossy());
+
+        self.exclude.iter().any(|pattern| {
+            pattern.matches_with(&full, options)
+                || name
+                    .as_deref()
+                    .is_some_and(|name| pattern.matches_with(name, options))
+        })
+    }
+
+    /// Whether a file of `size` bytes, last modified at `modified`, may go.
+    fn accepts(&self, size: u64, modified: Option<u64>) -> bool {
+        self.rules.accepts(size, modified, self.now)
+    }
+}
+
+/// A file's modification time, in seconds since the Unix epoch, when the
+/// platform reports one.
+fn modified_secs(meta: &cap_std::fs::Metadata) -> Option<u64> {
+    meta.modified()
+        .ok()
+        .and_then(|time| time.into_std().duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+}
+
 /// Removes (or measures) one named file inside an open directory handle.
 ///
 /// Returns the file's size together with whether it can actually be reached by
@@ -121,6 +214,7 @@ fn remove_file_in_dir(
     name: &Path,
     path: &Path,
     mode: Mode,
+    filter: &Filter,
 ) -> io::Result<(u64, deletable::Deletable)> {
     let meta = dir.symlink_metadata(name)?;
     if meta.is_symlink() {
@@ -134,7 +228,14 @@ fn remove_file_in_dir(
     }
     let len = meta.len();
     if mode.removes() {
-        dir.remove_file(name)?;
+        if filter.rules.to_trash {
+            // The item leaves the way it came in: by path, through the shell or
+            // the trash directory. The handle inside `dir` is not needed and is
+            // deliberately not used — a bin takes names, not descriptors.
+            trash::send(path)?;
+        } else {
+            dir.remove_file(name)?;
+        }
         return Ok((len, deletable::Deletable::Yes));
     }
     // INFO: probed after the stat and before the caller adds it to the totals.
@@ -144,13 +245,17 @@ fn remove_file_in_dir(
     Ok((len, deletable::is_deletable(path)))
 }
 
-fn remove_file_sync(path: &Path, mode: Mode) -> io::Result<(u64, deletable::Deletable)> {
+fn remove_file_sync(
+    path: &Path,
+    mode: Mode,
+    filter: &Filter,
+) -> io::Result<(u64, deletable::Deletable)> {
     let name = path
         .file_name()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no file name in path"))?;
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let dir = open_dir_without_links(parent)?;
-    remove_file_in_dir(&dir, Path::new(name), path, mode)
+    remove_file_in_dir(&dir, Path::new(name), path, mode, filter)
 }
 
 /// What one removal took: the totals the run reports, plus one entry per item
@@ -279,6 +384,7 @@ fn remove_dir_in_dir(
     name: &Path,
     path: &Path,
     mode: Mode,
+    filter: &Filter,
 ) -> io::Result<Removed> {
     let meta = parent_dir.symlink_metadata(name)?;
     if meta.is_symlink() {
@@ -287,27 +393,62 @@ fn remove_dir_in_dir(
             "symlink not supported",
         ));
     }
+
+    // A whole directory going to the bin is one move, so the walk is only there
+    // to say what that move is worth — and it has to run in Measure even during
+    // a real run, because the items are not being deleted one by one.
+    if filter.rules.to_trash && filter.is_empty() {
+        let dir = parent_dir.open_dir(name)?;
+        let mut removed = remove_dir_recursive(&dir, path, Mode::Measure, filter)?;
+        drop(dir);
+
+        if mode.removes() {
+            trash::send(path)?;
+        }
+
+        removed.merge(Removed::folder(path));
+        return Ok(removed);
+    }
+
     let dir = parent_dir.open_dir(name)?;
     // Keep the handle open only while walking; on Windows a directory cannot
     // be removed while any handle to it is open (cap-std omits FILE_SHARE_DELETE).
-    let mut removed = remove_dir_recursive(&dir, path, mode)?;
+    let walk = if filter.is_empty() {
+        FilteredWalk {
+            removed: remove_dir_recursive(&dir, path, mode, filter)?,
+            kept: false,
+        }
+    } else {
+        remove_dir_filtered(&dir, path, mode, filter, 0)?
+    };
     drop(dir);
-    // The directory counts itself in either mode: it is the one item the caller
-    // named, and a measured run has to report the same shape as a real one.
-    if mode.removes() {
-        parent_dir.remove_dir(name)?; // root is now empty
+
+    let mut removed = walk.removed;
+
+    // A walk that kept something cannot remove the directory around it, and must
+    // not count it: the entry named a directory to remove and the filter said
+    // "not all of it", which leaves the directory where it is.
+    if !walk.kept {
+        if mode.removes() {
+            parent_dir.remove_dir(name)?; // root is now empty
+        }
+
+        // The directory counts itself in either mode: it is the one item the
+        // caller named, and a measured run has to report the same shape as a
+        // real one.
+        removed.merge(Removed::folder(path));
     }
-    removed.merge(Removed::folder(path));
+
     Ok(removed)
 }
 
-fn remove_dir_sync(root: PathBuf, mode: Mode) -> io::Result<Removed> {
+fn remove_dir_sync(root: PathBuf, mode: Mode, filter: &Filter) -> io::Result<Removed> {
     let name = root.file_name().ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidInput, "cannot remove filesystem root")
     })?;
     let parent = root.parent().unwrap_or_else(|| Path::new("."));
     let parent_dir = open_dir_without_links(parent)?;
-    remove_dir_in_dir(&parent_dir, Path::new(name), &root, mode)
+    remove_dir_in_dir(&parent_dir, Path::new(name), &root, mode, filter)
 }
 
 // INFO: Depth-first deletion relative to open handles. Entry types come from
@@ -316,7 +457,12 @@ fn remove_dir_sync(root: PathBuf, mode: Mode) -> io::Result<Removed> {
 //
 // INFO: `path` is the directory being walked, so every item removed below it can
 // be named by its full path rather than by a bare entry name.
-fn remove_dir_recursive(dir: &cap_std::fs::Dir, path: &Path, mode: Mode) -> io::Result<Removed> {
+fn remove_dir_recursive(
+    dir: &cap_std::fs::Dir,
+    path: &Path,
+    mode: Mode,
+    filter: &Filter,
+) -> io::Result<Removed> {
     let mut removed = Removed::default();
 
     for entry in dir.entries()? {
@@ -357,7 +503,7 @@ fn remove_dir_recursive(dir: &cap_std::fs::Dir, path: &Path, mode: Mode) -> io::
             }
         } else if ft.is_dir() {
             let sub = dir.open_dir(&name)?;
-            let child = remove_dir_recursive(&sub, &entry_path, mode)?;
+            let child = remove_dir_recursive(&sub, &entry_path, mode, filter)?;
             drop(sub); // release handle before removing (Windows FILE_SHARE_DELETE)
             removed.merge(child);
             if mode.removes() {
@@ -378,12 +524,16 @@ fn remove_dir_recursive(dir: &cap_std::fs::Dir, path: &Path, mode: Mode) -> io::
         } else {
             let bytes = entry.metadata()?.len();
             if mode.removes() {
-                // A locked file fails here, and the whole walk of this
-                // directory stops with it: the entry that wanted the directory
-                // removed cannot remove a non-empty one. That is the real
-                // behaviour, so the scan has to predict it rather than report a
-                // size the run will not deliver.
-                dir.remove_file(&name)?;
+                if filter.rules.to_trash {
+                    trash::send(&entry_path)?;
+                } else {
+                    // A locked file fails here, and the whole walk of this
+                    // directory stops with it: the entry that wanted the directory
+                    // removed cannot remove a non-empty one. That is the real
+                    // behaviour, so the scan has to predict it rather than report a
+                    // size the run will not deliver.
+                    dir.remove_file(&name)?;
+                }
                 removed.merge(Removed::file(&entry_path, bytes));
             } else {
                 let reason = deletable::is_deletable(&entry_path);
@@ -399,6 +549,137 @@ fn remove_dir_recursive(dir: &cap_std::fs::Dir, path: &Path, mode: Mode) -> io::
         }
     }
     Ok(removed)
+}
+
+/// What a filtered walk of one directory found.
+struct FilteredWalk {
+    removed: Removed,
+    /// Whether something under it was deliberately left in place. A directory
+    /// with anything kept cannot be removed, so this is what stops the caller
+    /// from trying and from counting it.
+    kept: bool,
+}
+
+/// Depth-first removal of what `filter` accepts, leaving the rest.
+///
+/// This is the counterpart of [`remove_dir_recursive`] for entries that do not
+/// remove everything they match. The differences are all deliberate: excluded
+/// names are skipped rather than deleted, `max_depth` stops the descent instead
+/// of the walk, and a directory is only removed once its contents are gone — so
+/// a filter that keeps a single file also keeps the whole tree around it.
+fn remove_dir_filtered(
+    dir: &cap_std::fs::Dir,
+    path: &Path,
+    mode: Mode,
+    filter: &Filter,
+    depth: u32,
+) -> io::Result<FilteredWalk> {
+    let mut walk = FilteredWalk {
+        removed: Removed::default(),
+        kept: false,
+    };
+
+    for entry in dir.entries()? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let entry_path = path.join(&name);
+
+        if filter.excluded(&entry_path) {
+            walk.kept = true;
+            continue;
+        }
+
+        let ft = entry.file_type()?;
+        let child_depth = depth + 1;
+        let too_deep = filter.rules.max_depth.is_some_and(|max| child_depth > max);
+
+        if too_deep {
+            // Past the limit nothing is touched, not even a link: the point of
+            // the limit is to leave the subtree exactly as it is.
+            walk.kept = true;
+            continue;
+        }
+
+        if ft.is_symlink() {
+            // A link is not data, only a pointer: it goes whenever it is in
+            // reach, so the tree does not fill up with dead links. It is never
+            // followed — see the comment in [`remove_dir_recursive`].
+            if mode.removes() {
+                #[cfg(windows)]
+                {
+                    if dir.remove_file(&name).is_err() {
+                        dir.remove_dir(&name)?;
+                        walk.removed.merge(Removed::folder(&entry_path));
+                        continue;
+                    }
+                }
+                #[cfg(not(windows))]
+                {
+                    dir.remove_file(&name)?;
+                }
+
+                walk.removed.merge(Removed::file(&entry_path, 0));
+            } else {
+                walk.removed.merge(Removed::file(&entry_path, 0));
+            }
+        } else if ft.is_dir() {
+            let sub = dir.open_dir(&name)?;
+            let child = remove_dir_filtered(&sub, &entry_path, mode, filter, child_depth)?;
+            drop(sub);
+
+            walk.kept |= child.kept;
+            walk.removed.merge(child.removed);
+
+            if child.kept {
+                continue;
+            }
+
+            if mode.removes() {
+                // Best effort: the directory can still refuse (a file appeared
+                // in it between the walk and the removal), and one stubborn
+                // empty directory is not a reason to abandon the rest.
+                if dir.remove_dir(&name).is_ok() {
+                    walk.removed.merge(Removed::folder(&entry_path));
+                } else {
+                    walk.kept = true;
+                }
+            } else {
+                let reason = deletable::is_deletable(&entry_path);
+                if reason.is_yes() {
+                    walk.removed.merge(Removed::folder(&entry_path));
+                } else {
+                    walk.removed
+                        .merge_blocked(Removed::folder(&entry_path), reason);
+                }
+            }
+        } else {
+            let meta = entry.metadata()?;
+
+            if !filter.accepts(meta.len(), modified_secs(&meta)) {
+                walk.kept = true;
+                continue;
+            }
+
+            if mode.removes() {
+                if filter.rules.to_trash {
+                    trash::send(&entry_path)?;
+                } else {
+                    dir.remove_file(&name)?;
+                }
+                walk.removed.merge(Removed::file(&entry_path, meta.len()));
+            } else {
+                let reason = deletable::is_deletable(&entry_path);
+                if reason.is_yes() {
+                    walk.removed.merge(Removed::file(&entry_path, meta.len()));
+                } else {
+                    let item = Removed::file(&entry_path, meta.len());
+                    walk.removed.merge_blocked(item, reason);
+                }
+            }
+        }
+    }
+
+    Ok(walk)
 }
 
 #[derive(Default)]
@@ -500,7 +781,13 @@ impl PathStats {
 
 // INFO: All filesystem work for one matched path, executed inside a single
 // blocking task. Uses the same cap-std operations as before (no TOCTOU window).
-fn clean_path_sync(path: &Path, shared: &SharedPath, data: &CleanerData, mode: Mode) -> PathStats {
+fn clean_path_sync(
+    path: &Path,
+    shared: &SharedPath,
+    data: &CleanerData,
+    filter: &Filter,
+    mode: Mode,
+) -> PathStats {
     let mut stats = PathStats::default();
 
     // Closed before the flags run, and that is not tidiness: cap-std opens
@@ -537,7 +824,13 @@ fn clean_path_sync(path: &Path, shared: &SharedPath, data: &CleanerData, mode: M
         };
         let Some(dir) = &named_dir else { break };
         let fpath = path.join(&relative);
-        match remove_file_in_dir(dir, &relative, &fpath, mode) {
+        // A named file is subject to the same age and size rule as everything
+        // else: `files_to_remove: ["*.log"]` plus `older_than` is how a rule says
+        // "the old logs, not the live one".
+        if !filter_allows_file(filter, dir, &Path::new(fname.as_ref()), &fpath) {
+            continue;
+        }
+        match remove_file_in_dir(dir, &relative, &fpath, mode, filter) {
             // The file's own path, not its parent's: that is what was deleted.
             Ok((b, reason)) => {
                 let removed = Removed::file(&fpath, b);
@@ -567,7 +860,12 @@ fn clean_path_sync(path: &Path, shared: &SharedPath, data: &CleanerData, mode: M
         };
         let Some(dir) = &named_dir else { break };
         let dpath = path.join(&relative);
-        match remove_dir_in_dir(dir, &relative, &dpath, mode) {
+
+        if filter.excluded(&dpath) {
+            continue;
+        }
+
+        match remove_dir_in_dir(dir, &relative, &dpath, mode, filter) {
             // Every item inside it is listed by name, not folded into one line:
             // "3 files, 3 dirs" beside a single path tells the reader how much
             // went and nothing about what.
@@ -584,13 +882,23 @@ fn clean_path_sync(path: &Path, shared: &SharedPath, data: &CleanerData, mode: M
 
     if data.flags.contains(CleanerFlags::REMOVE_ALL_IN_DIR) {
         // try fast; skip is_dir check for speed (A)
-        if let Ok(removed) = remove_dir_sync(path.to_path_buf(), mode) {
+        if let Ok(removed) = remove_dir_sync(path.to_path_buf(), mode, filter) {
             stats.add(removed);
         }
     }
 
     if data.flags.contains(CleanerFlags::REMOVE_FILES)
-        && let Ok((b, reason)) = remove_file_sync(path, mode)
+        && !filter.excluded(path)
+        && let Some(meta) = std::fs::symlink_metadata(path).ok()
+        && filter.accepts(
+            meta.len(),
+            meta.modified().ok().and_then(|t| {
+                t.duration_since(std::time::UNIX_EPOCH)
+                    .ok()
+                    .map(|d| d.as_secs())
+            }),
+        )
+        && let Ok((b, reason)) = remove_file_sync(path, mode, filter)
     {
         // The matched path itself, interned: listing it costs a pointer, not a
         // copy of the segments.
@@ -613,7 +921,7 @@ fn clean_path_sync(path: &Path, shared: &SharedPath, data: &CleanerData, mode: M
     }
 
     if data.flags.contains(CleanerFlags::REMOVE_DIRECTORIES)
-        && let Ok(removed) = remove_dir_sync(path.to_path_buf(), mode)
+        && let Ok(removed) = remove_dir_sync(path.to_path_buf(), mode, filter)
     {
         stats.add(removed);
     }
@@ -621,12 +929,34 @@ fn clean_path_sync(path: &Path, shared: &SharedPath, data: &CleanerData, mode: M
     if data
         .flags
         .contains(CleanerFlags::REMOVE_DIRECTORY_AFTER_CLEAN)
-        && let Ok(removed) = remove_dir_sync(path.to_path_buf(), mode)
+        && let Ok(removed) = remove_dir_sync(path.to_path_buf(), mode, filter)
     {
         stats.add(removed);
     }
 
     stats
+}
+
+/// Whether a file the entry names by hand passes the filter.
+///
+/// The size and age come from the open directory handle when there is one, so
+/// the check describes the same file the removal is about to visit rather than
+/// whatever the path resolves to a moment later.
+fn filter_allows_file(filter: &Filter, dir: &cap_std::fs::Dir, name: &Path, path: &Path) -> bool {
+    if filter.is_empty() {
+        return true;
+    }
+
+    if filter.excluded(path) {
+        return false;
+    }
+
+    match dir.symlink_metadata(name) {
+        Ok(meta) => filter.accepts(meta.len(), modified_secs(&meta)),
+        // A named file that is not there has nothing to clean either way; saying
+        // no keeps this from turning into a "file vanished" warning per run.
+        Err(_) => false,
+    }
 }
 
 // PERF: Cap on simultaneously-live per-path futures inside a single cleaner.
@@ -643,6 +973,7 @@ const MAX_PATHS_IN_FLIGHT: usize = 64;
 async fn clean_one_path(
     path: PathBuf,
     data: Arc<CleanerData>,
+    filter: Arc<Filter>,
     mode: Mode,
 ) -> (SharedPath, PathStats) {
     // Interned before `path` moves into the blocking task: the segments are
@@ -660,9 +991,11 @@ async fn clean_one_path(
 
     // Every failure mode (join error, etc.) falls back to a non-working result,
     // matching the previous per-operation error handling.
-    let stats = tokio::task::spawn_blocking(move || clean_path_sync(&path, &for_task, &data, mode))
-        .await
-        .unwrap_or_default();
+    let stats = tokio::task::spawn_blocking(move || {
+        clean_path_sync(&path, &for_task, &data, &filter, mode)
+    })
+    .await
+    .unwrap_or_default();
 
     (shared, stats)
 }
@@ -694,6 +1027,14 @@ async fn walk_data(data: &CleanerData, mode: Mode) -> CleanerResult {
         denied: Vec::new(),
     };
 
+    // The rule asks not to run while its owner is open: a browser writes its
+    // cache straight back, so cleaning it under a running browser is work that
+    // is undone before the user sees the result. Checked once per entry, before
+    // anything is walked — the answer cannot change inside a run.
+    if processes::running(&data.filter.skip_if_running) {
+        return out;
+    }
+
     // INFO: Reject parent-dir traversal in the DB-supplied glob pattern
     let path_str = data.path.to_string();
     if Path::new(&path_str)
@@ -711,6 +1052,9 @@ async fn walk_data(data: &CleanerData, mode: Mode) -> CleanerResult {
     // PERF: share one DB entry across all matched paths (Arc) instead of a full
     // clone per path, and keep at most MAX_PATHS_IN_FLIGHT futures alive.
     let data = Arc::new(data.clone());
+    // Compiled once for the whole entry: the exclude globs and the clock are
+    // shared by every matched path.
+    let filter = Arc::new(Filter::new(&data.filter));
 
     let mut path_stream = stream::iter(
         glob_iter
@@ -723,7 +1067,7 @@ async fn walk_data(data: &CleanerData, mode: Mode) -> CleanerResult {
             // them here instead of paying a warning on every run.
             .filter(|path| !is_linked(path)),
     )
-    .map(|path| clean_one_path(path, Arc::clone(&data), mode))
+    .map(|path| clean_one_path(path, Arc::clone(&data), Arc::clone(&filter), mode))
     .buffer_unordered(MAX_PATHS_IN_FLIGHT);
 
     while let Some((_, stats)) = path_stream.next().await {
@@ -832,6 +1176,7 @@ mod tests {
             files_to_remove: vec![],
             directories_to_remove: vec![],
             flags: CleanerFlags::empty(),
+            filter: Default::default(),
         }
     }
 
@@ -1655,6 +2000,134 @@ mod tests {
         assert!(target.join("valuable.txt").exists());
         assert!(link.exists());
     }
+
+    /// A filter's exclusions are the difference between "delete this cache" and
+    /// "delete this cache but not the user's saved logins". The named entry and
+    /// everything under it has to survive, and it must not be counted.
+    #[tokio::test]
+    async fn an_exclusion_keeps_the_named_entry_and_its_contents() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path().join("cache");
+        fs::create_dir_all(root.join("user-data")).unwrap();
+        fs::write(root.join("junk.tmp"), b"12345").unwrap();
+        fs::write(root.join("user-data").join("Logins"), b"secret").unwrap();
+
+        let mut data = create_test_data(root.to_str().unwrap().to_string());
+        data.flags.insert(CleanerFlags::REMOVE_ALL_IN_DIR);
+        data.filter.exclude.push("user-data".into());
+
+        let result = clear_data(&data).await;
+
+        assert!(!root.join("junk.tmp").exists());
+        assert!(
+            root.join("user-data").join("Logins").exists(),
+            "an excluded directory must keep everything under it"
+        );
+        assert_eq!(result.files, 1);
+        assert_eq!(result.bytes, 5);
+    }
+
+    /// `older_than` is measured from the file's mtime, and a file that is not
+    /// old enough is neither removed nor counted.
+    #[tokio::test]
+    async fn files_younger_than_the_age_limit_are_left_alone() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path().join("logs");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("fresh.log"), b"new").unwrap();
+
+        let mut data = create_test_data(root.to_str().unwrap().to_string());
+        data.flags.insert(CleanerFlags::REMOVE_ALL_IN_DIR);
+        data.filter.older_than_seconds = Some(86_400);
+
+        let result = clear_data(&data).await;
+
+        assert!(root.join("fresh.log").exists());
+        assert_eq!(result.files, 0);
+        assert_eq!(result.bytes, 0);
+    }
+
+    /// Size bounds are a property of the file, checked on the same walk.
+    #[tokio::test]
+    async fn size_bounds_are_applied_per_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path().join("cache");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("small.bin"), vec![0u8; 10]).unwrap();
+        fs::write(root.join("big.bin"), vec![0u8; 100]).unwrap();
+
+        let mut data = create_test_data(root.to_str().unwrap().to_string());
+        data.flags.insert(CleanerFlags::REMOVE_ALL_IN_DIR);
+        data.filter.min_size = Some(50);
+
+        let result = clear_data(&data).await;
+
+        assert!(root.join("small.bin").exists(), "too small to remove");
+        assert!(!root.join("big.bin").exists());
+        assert_eq!(result.files, 1);
+        assert_eq!(result.bytes, 100);
+    }
+
+    /// Depth is counted from the matched path: an entry directly inside it is
+    /// depth 1, so `max_depth(1)` is one level and nothing below it.
+    #[tokio::test]
+    async fn max_depth_stops_the_walk_where_it_says() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path().join("cache");
+        fs::create_dir_all(root.join("a").join("b")).unwrap();
+        fs::write(root.join("one.tmp"), b"1").unwrap();
+        fs::write(root.join("a").join("two.tmp"), b"22").unwrap();
+        fs::write(root.join("a").join("b").join("three.tmp"), b"333").unwrap();
+
+        let mut data = create_test_data(root.to_str().unwrap().to_string());
+        data.flags.insert(CleanerFlags::REMOVE_ALL_IN_DIR);
+        data.filter.max_depth = Some(2);
+
+        let result = clear_data(&data).await;
+
+        assert!(!root.join("one.tmp").exists(), "depth 1 is inside");
+        assert!(!root.join("a").join("two.tmp").exists(), "depth 2 too");
+        assert!(
+            root.join("a").join("b").join("three.tmp").exists(),
+            "depth 3 is past the limit"
+        );
+        assert_eq!(result.files, 2);
+    }
+
+    /// A filter that only excludes cannot let the walk take the
+    /// delete-everything shortcut, or the exclusion would be ignored.
+    #[test]
+    fn a_filter_with_only_an_exclusion_is_not_empty() {
+        let mut filter = CleanerFilter::default();
+        assert!(filter.is_empty());
+
+        filter.exclude.push("keep".into());
+        assert!(!filter.is_empty());
+    }
+
+    /// The same walk runs for a scan, so a filtered scan promises exactly what
+    /// the filtered run would free.
+    #[tokio::test]
+    async fn a_filtered_scan_agrees_with_the_filtered_run() {
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path().join("cache");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("keep.lock"), b"keep").unwrap();
+        fs::write(root.join("junk.tmp"), b"junk").unwrap();
+
+        let mut data = create_test_data(root.to_str().unwrap().to_string());
+        data.flags.insert(CleanerFlags::REMOVE_ALL_IN_DIR);
+        data.filter.exclude.push("*.lock".into());
+
+        let scanned = scan_data(&data).await;
+        assert_eq!(scanned.files, 1);
+        assert_eq!(scanned.bytes, 4);
+
+        let run = clear_data(&data).await;
+        assert_eq!(run.files, scanned.files);
+        assert_eq!(run.bytes, scanned.bytes);
+        assert!(root.join("keep.lock").exists());
+    }
 }
 
 // Property-based tests with proptest
@@ -1694,6 +2167,7 @@ mod proptests {
                 files_to_remove: vec![],
                 directories_to_remove: vec![],
                 flags: CleanerFlags::REMOVE_FILES,
+                filter: Default::default(),
             };
 
             let result = run_async(clear_data(&data));
@@ -1721,6 +2195,7 @@ mod proptests {
                 files_to_remove: vec![],
                 directories_to_remove: vec![],
                 flags: CleanerFlags::REMOVE_FILES,
+                filter: Default::default(),
             };
 
             let result = run_async(clear_data(&data));
@@ -1740,6 +2215,7 @@ mod proptests {
                 files_to_remove: vec![],
                 directories_to_remove: vec![],
                 flags: CleanerFlags::REMOVE_FILES,
+                filter: Default::default(),
             };
 
             let result = run_async(clear_data(&data));
@@ -1769,6 +2245,7 @@ mod proptests {
                 files_to_remove: vec![],
                 directories_to_remove: vec![],
                 flags: CleanerFlags::REMOVE_DIRECTORIES,
+                filter: Default::default(),
             };
 
             let result = run_async(clear_data(&data));
@@ -1792,6 +2269,7 @@ mod proptests {
                 files_to_remove: vec![],
                 directories_to_remove: vec![],
                 flags: CleanerFlags::REMOVE_FILES,
+                filter: Default::default(),
             };
 
             let result = run_async(clear_data(&data));
@@ -1821,6 +2299,7 @@ mod proptests {
                 files_to_remove: vec![],
                 directories_to_remove: vec![],
                 flags: CleanerFlags::REMOVE_DIRECTORIES,
+                filter: Default::default(),
             };
 
             let result = run_async(clear_data(&data));
@@ -1849,6 +2328,7 @@ mod proptests {
                 files_to_remove: vec![std::sync::Arc::from(filename.clone())],
                 directories_to_remove: vec![],
                 flags: CleanerFlags::empty(),
+                filter: Default::default(),
             };
 
             let result = run_async(clear_data(&data));
@@ -1882,6 +2362,7 @@ mod proptests {
                 files_to_remove: vec![],
                 directories_to_remove: vec![],
                 flags: CleanerFlags::REMOVE_FILES,
+                filter: Default::default(),
             };
 
             let result = run_async(clear_data(&data));

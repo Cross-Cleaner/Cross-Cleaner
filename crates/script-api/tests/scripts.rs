@@ -9,6 +9,7 @@ use std::path::Path;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use database::structures::Cleared;
+use script_api::RunTotals;
 
 /// Guards the process-wide script collector.
 fn lock() -> MutexGuard<'static, ()> {
@@ -81,7 +82,7 @@ fn a_rule_with_nothing_to_remove_is_an_error() {
         "empty.rn",
         r#"
         pub fn main() {
-            cleaner::file_cleaner("Empty").path("/tmp/nothing").register();
+            cleaner::file_cleaner("Empty").category("Cache").path("/tmp/nothing").register();
         }
         "#,
     );
@@ -166,7 +167,7 @@ fn a_handler_may_await_and_use_std() {
         &format!(
             r#"
             pub fn main() {{
-                cleaner::custom_cleaner("Async App")
+                cleaner::custom_cleaner("Async App").category("Cache")
                     .path({})
                     .register();
             }}
@@ -209,7 +210,7 @@ fn a_broken_script_contributes_nothing_and_is_reported() {
         "broken.rn",
         r#"
         pub fn main() {
-            cleaner::file_cleaner("Half Done").path("/tmp/x").remove_all_in_dir().register();
+            cleaner::file_cleaner("Half Done").category("Cache").path("/tmp/x").remove_all_in_dir().register();
             this is not rune
         }
         "#,
@@ -232,7 +233,7 @@ fn a_panicking_main_is_rolled_back() {
         "panics.rn",
         r#"
         pub fn main() {
-            cleaner::file_cleaner("Half Done").path("/tmp/x").remove_all_in_dir().register();
+            cleaner::file_cleaner("Half Done").category("Cache").path("/tmp/x").remove_all_in_dir().register();
             panic!("boom");
         }
         "#,
@@ -294,6 +295,7 @@ fn the_finished_hook_receives_the_per_program_breakdown() {
             removed_files: 1,
             removed_directories: 0,
             affected_categories: vec!["Cache".into()],
+            category_totals: Vec::new(),
             paths: Vec::new(),
             paths_omitted: 0,
         },
@@ -303,6 +305,7 @@ fn the_finished_hook_receives_the_per_program_breakdown() {
             removed_files: 3,
             removed_directories: 2,
             affected_categories: vec!["Cache".into(), "Logs".into()],
+            category_totals: Vec::new(),
             paths: Vec::new(),
             paths_omitted: 0,
         },
@@ -312,12 +315,21 @@ fn the_finished_hook_receives_the_per_program_breakdown() {
             removed_files: 0,
             removed_directories: 1,
             affected_categories: vec!["Logs".into()],
+            category_totals: Vec::new(),
             paths: Vec::new(),
             paths_omitted: 0,
         },
     ];
 
-    script_api::notify_finished(2_015, 4, 3, &cleared);
+    script_api::notify_finished(
+        RunTotals {
+            bytes: 2_015,
+            files: 4,
+            folders: 3,
+            ..RunTotals::default()
+        },
+        &cleared,
+    );
 
     // The hook runs on a background thread; wait for it to land.
     let mut text = String::new();
@@ -412,7 +424,7 @@ fn the_decisions_and_path_helpers_answer_about_real_files() {
         &format!(
             r#"
             pub fn main() {{
-                cleaner::custom_cleaner("Helpers").path({}).handler("check").register();
+                cleaner::custom_cleaner("Helpers").category("Cache").path({}).handler("check").register();
             }}
 
             pub fn check(path) {{
@@ -523,7 +535,7 @@ fn the_started_and_error_hooks_run_in_their_own_phase() {
     assert_eq!(fs::read_to_string(&started).unwrap(), "started");
 
     // A run that went clean calls `is_finished`, not `on_error`.
-    script_api::notify_finished(0, 0, 0, &[]);
+    script_api::notify_finished(RunTotals::default(), &[]);
     wait_for_file(&finished);
     assert!(!failed.exists(), "a clean run must not call on_error");
 
@@ -534,11 +546,20 @@ fn the_started_and_error_hooks_run_in_their_own_phase() {
         removed_files: 2,
         removed_directories: 0,
         affected_categories: vec!["Cache".into()],
+        category_totals: Vec::new(),
         paths: Vec::new(),
         paths_omitted: 0,
     }];
 
-    script_api::notify_failed(12, 2, 0, &locked, "3 files were still in use");
+    script_api::notify_failed(
+        RunTotals {
+            bytes: 12,
+            files: 2,
+            ..RunTotals::default()
+        },
+        &locked,
+        "3 files were still in use",
+    );
     assert_eq!(
         wait_for_file(&failed),
         "3 files were still in use",
@@ -575,7 +596,7 @@ fn rules_can_be_restricted_to_other_operating_systems() {
                 .remove_all_in_dir()
                 .register();
 
-            cleaner::file_cleaner("Here")
+            cleaner::file_cleaner("Here").category("Cache")
                 .path("/tmp/whatever")
                 .os([cleaner::os()])
                 .remove_all_in_dir()
@@ -690,4 +711,301 @@ fn a_script_can_read_and_remove_registry_values() {
     assert!(fields[3].parse::<usize>().unwrap() >= 1, "{text}");
     assert_eq!(fields[4], "true", "{text}");
     assert_eq!(fields[5], "true", "{text}");
+}
+
+#[test]
+fn selection_filters_and_extra_paths_reach_the_database() {
+    let _guard = lock();
+    let dir = tempfile::tempdir().unwrap();
+
+    let scripts = load(
+        dir.path(),
+        "filters.rn",
+        r#"
+        pub fn main() {
+            cleaner::file_cleaner("Filtered")
+                .category("Cache")
+                .path("/tmp/one")
+                .paths(["/tmp/two", "/tmp/three"])
+                .exclude(["*.lock", "user-data"])
+                .older_than(7)
+                .min_size("1 MB")
+                .max_size("2 GB")
+                .max_depth(3)
+                .skip_if_running(["chrome.exe"])
+                .to_trash()
+                .remove_all_in_dir()
+                .register();
+        }
+        "#,
+    );
+
+    assert!(scripts.errors.is_empty(), "{:?}", scripts.errors);
+
+    // One entry per path, same program, so the results fold into one row.
+    assert_eq!(scripts.files.len(), 3);
+    let paths: Vec<String> = scripts
+        .files
+        .iter()
+        .map(|entry| entry.path.as_string())
+        .collect();
+    assert_eq!(paths, vec!["/tmp/one", "/tmp/two", "/tmp/three"]);
+
+    let filter = &scripts.files[0].filter;
+    assert_eq!(
+        filter.exclude.iter().map(|p| &**p).collect::<Vec<_>>(),
+        vec!["*.lock", "user-data"]
+    );
+    assert_eq!(filter.older_than_seconds, Some(7 * 86_400));
+    assert_eq!(filter.min_size, Some(1_048_576));
+    assert_eq!(filter.max_size, Some(2_147_483_648));
+    assert_eq!(filter.max_depth, Some(3));
+    assert_eq!(
+        filter
+            .skip_if_running
+            .iter()
+            .map(|p| &**p)
+            .collect::<Vec<_>>(),
+        vec!["chrome.exe"]
+    );
+    assert!(filter.to_trash);
+}
+
+#[test]
+fn within_keeps_a_handler_inside_its_own_directory() {
+    let _guard = lock();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("root");
+    let outside = dir.path().join("outside");
+
+    fs::create_dir_all(&root).unwrap();
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(root.join("a.tmp"), "aaaa").unwrap();
+    fs::write(outside.join("b.tmp"), "bbbb").unwrap();
+
+    let scripts = load(
+        dir.path().join("scripts").as_path(),
+        "fenced.rn",
+        &format!(
+            r#"
+            pub fn main() {{
+                cleaner::custom_cleaner("Fenced")
+                    .category("Cache")
+                    .path({root})
+                    .within({root})
+                    .handler("clean")
+                    .register();
+            }}
+
+            // A bug: the pattern points at the parent, not at the root it was
+            // given. `within` is what turns that into "nothing happened".
+            pub fn clean(path) {{
+                for entry in cleaner::glob({outside_pattern}) {{
+                    cleaner::remove_file(entry);
+                }}
+
+                for entry in cleaner::glob(`${{path}}/*.tmp`) {{
+                    cleaner::remove_file(entry);
+                }}
+            }}
+            "#,
+            root = literal(&root),
+            outside_pattern = literal(&outside.join("**").join("*.tmp")),
+        ),
+    );
+
+    assert!(scripts.errors.is_empty(), "{:?}", scripts.errors);
+
+    let cleaner = scripts.custom[0].clone();
+    let result = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async { (cleaner.function)(&cleaner, None).await });
+
+    assert!(
+        outside.join("b.tmp").exists(),
+        "a removal outside `within` must be refused"
+    );
+    assert!(!root.join("a.tmp").exists(), "inside the fence still works");
+    assert_eq!(result.files, 1, "the refused file is not counted");
+    assert_eq!(result.bytes, 4);
+}
+
+#[test]
+fn every_script_is_reported_even_when_it_fails() {
+    let _guard = lock();
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path()).unwrap();
+
+    fs::write(
+        dir.path().join("good.rn"),
+        r#"
+        pub fn main() {
+            cleaner::file_cleaner("Good")
+                .category("Cache")
+                .path("/tmp/good")
+                .remove_all_in_dir()
+                .register();
+        }
+        "#,
+    )
+    .unwrap();
+
+    fs::write(
+        dir.path().join("bad.rn"),
+        "pub fn main() { this is not rune }",
+    )
+    .unwrap();
+
+    let scripts = script_api::load_from(dir.path());
+
+    // Two files, two rows: the one that failed has to be visible, or a user
+    // whose script does nothing has no way to find out why.
+    assert_eq!(scripts.reports.len(), 2);
+    let good = scripts
+        .reports
+        .iter()
+        .find(|report| report.path.ends_with("good.rn"))
+        .unwrap();
+    let bad = scripts
+        .reports
+        .iter()
+        .find(|report| report.path.ends_with("bad.rn"))
+        .unwrap();
+
+    assert!(good.error.is_none());
+    assert_eq!(good.files, 1);
+    assert!(bad.error.is_some());
+    assert_eq!(bad.files, 0);
+}
+
+#[test]
+fn a_rule_without_a_category_is_refused_rather_than_guessed() {
+    let _guard = lock();
+    let dir = tempfile::tempdir().unwrap();
+
+    let scripts = load(
+        dir.path(),
+        "uncategorised.rn",
+        r#"
+        pub fn main() {
+            cleaner::file_cleaner("No Category")
+                .path("/tmp/whatever")
+                .remove_all_in_dir()
+                .register();
+        }
+        "#,
+    );
+
+    // A cleaner lands in a category the user selects; guessing "Other" would
+    // hide it from every category and no one would know why.
+    assert!(scripts.files.is_empty());
+    assert_eq!(scripts.errors.len(), 1);
+    assert!(
+        scripts.errors[0].message.contains("category"),
+        "{:?}",
+        scripts.errors
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn a_script_can_read_types_export_and_back_up_a_key() {
+    let _guard = lock();
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("typed.txt");
+    let dump = dir.path().join("dump.txt");
+
+    let key = format!(
+        "HKEY_CURRENT_USER\\Software\\Cross-Cleaner\\ScriptTests\\typed{}",
+        std::process::id(),
+    );
+    let key = key.replace('\\', "\\\\");
+
+    let scripts = load(
+        dir.path(),
+        "typed.rn",
+        &format!(
+            r#"
+            pub fn main() {{
+                cleaner::custom_cleaner("Typed App")
+                    .category("Registry")
+                    .path({work})
+                    .handler("walk")
+                    .register();
+            }}
+
+            pub fn walk(path) {{
+                let key = "{key}";
+
+                // A DWORD written by the script, read back as a number.
+                let wrote = cleaner::registry::write_dword(key, "Count", 41);
+                let count = match cleaner::registry::read_dword(key, "Count") {{
+                    Some(value) => value,
+                    None => 0,
+                }};
+                let no_qword = match cleaner::registry::read_qword(key, "Count") {{
+                    Some(value) => value,
+                    None => 0,
+                }};
+
+                // The type has to come back with the value: "is this safe to
+                // delete" is answered by the kind, not by the text.
+                let typed = cleaner::registry::values_full(key);
+                let kind = if typed.len() > 0 {{
+                    typed[0].kind
+                }} else {{
+                    "none"
+                }};
+
+                // A backup is the whole subtree as a file, so a script can undo
+                // what it is about to delete.
+                let text = cleaner::registry::export(key);
+                let backed_up = cleaner::registry::backup(key, {dump});
+
+                cleaner::write(
+                    {out},
+                    format!("{{}}|{{}}|{{}}|{{}}|{{}}|{{}}", wrote, count, no_qword, kind, text.len(), backed_up),
+                );
+
+                cleaner::registry::delete_key(key);
+            }}
+            "#,
+            work = literal(dir.path()),
+            key = key,
+            dump = literal(&dump),
+            out = literal(&out),
+        ),
+    );
+
+    assert!(scripts.errors.is_empty(), "{:?}", scripts.errors);
+
+    let cleaner = scripts.custom[0].clone();
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async { (cleaner.function)(&cleaner, None).await });
+
+    let text = fs::read_to_string(&out).unwrap();
+    let fields: Vec<&str> = text.split('|').collect();
+
+    assert_eq!(fields[0], "true", "{text}");
+    assert_eq!(fields[1], "41", "{text}");
+    assert_eq!(
+        fields[2], "0",
+        "a DWORD is not a QWORD, and the answer says so: {text}"
+    );
+    assert!(
+        fields[3].contains("DWORD"),
+        "the value type comes back with the value: {text}"
+    );
+    assert!(
+        fields[4].parse::<usize>().unwrap() > 0,
+        "the export has content: {text}"
+    );
+    assert_eq!(fields[5], "true", "{text}");
+    assert!(dump.exists(), "the backup file was written");
+    assert!(fs::read_to_string(&dump).unwrap().contains("Count"));
 }

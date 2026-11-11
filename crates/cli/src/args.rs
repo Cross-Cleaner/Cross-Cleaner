@@ -85,6 +85,8 @@ pub enum Command {
     Categories(ReportArgs),
     /// List the programs of the selected categories.
     Programs(ProgramsArgs),
+    /// Show the scripts that were found, what each declared and why one failed.
+    Scripts(ScriptsArgs),
     /// Check for, download and install a newer release.
     #[cfg(feature = "self-update")]
     Update(UpdateArgs),
@@ -226,6 +228,18 @@ pub struct ProgramsArgs {
     pub search: Option<String>,
 }
 
+/// Flags for `cli scripts`.
+#[derive(Args, Debug, Clone, Default)]
+pub struct ScriptsArgs {
+    /// Load every script again and report what each one declared, instead of
+    /// only listing the ones that loaded.
+    #[arg(long)]
+    pub check: bool,
+
+    #[command(flatten)]
+    pub output: OutputArgs,
+}
+
 #[cfg(feature = "self-update")]
 #[derive(Args, Debug)]
 pub struct UpdateArgs {
@@ -250,6 +264,7 @@ impl Command {
             Command::Plan(args) => args.output.clone(),
             Command::Categories(args) => args.output.clone(),
             Command::Programs(args) => args.output.clone(),
+            Command::Scripts(args) => args.output.clone(),
             #[cfg(feature = "self-update")]
             Command::Update(_) => OutputArgs::default(),
         }

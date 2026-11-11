@@ -59,6 +59,7 @@ fn main() -> io::Result<()> {
     // INFO: the custom cleaners are registered in a global registry, so this
     // has to happen before the database is assembled.
     cleaner::custom_cleaners::register_all();
+    appcore::scripts::init();
     appcore::scripts::register_custom_cleaners();
 
     let custom_database: Arc<[CustomCleaner]> = if args.disable_custom {

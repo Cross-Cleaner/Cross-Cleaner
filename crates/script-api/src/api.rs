@@ -6,16 +6,20 @@
 //! cleaning run.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 #[cfg(windows)]
 use database::structures::CleanerDataRegistry;
-use database::structures::{CleanerData, CleanerFlags, Cleared, CustomCleaner, SharedPath};
+use database::structures::{
+    CleanerData, CleanerFilter, CleanerFlags, Cleared, CustomCleaner, SharedPath,
+};
 use rune::{Any, ContextError, Module};
 
 use crate::collect::{self, CustomDefinition, HookKind};
 use crate::files;
 use crate::registry_api;
 use crate::remove::{self, Stats};
+use crate::session;
 
 /// Builds the Rune context scripts are compiled and run in.
 ///
@@ -25,8 +29,9 @@ use crate::remove::{self, Stats};
 /// * `std::*` — strings, vectors, iterators, `Option`/`Result`, `format!`;
 /// * `std::fs` — reading files (`read_to_string`);
 /// * `json` — building and parsing webhook payloads;
-/// * `rand`, `time`, `process` — jitter, deadlines, programs that are only
-///   scriptable through their command line;
+/// * `rand`, `time` — jitter and deadlines;
+/// * `process` — programs that are only scriptable through their command
+///   line, and only when the user allowed it in the config;
 /// * `cleaner` and `cleaner::registry` — this crate.
 ///
 /// Stdio is off unless `CROSS_CLEANER_SCRIPTS_STDIO` is set: a script printing
@@ -39,7 +44,15 @@ pub(crate) fn context() -> Result<rune::Context, ContextError> {
     context.install(rune_modules::json::module(false)?)?;
     context.install(rune_modules::rand::module(false)?)?;
     context.install(rune_modules::time::module(false)?)?;
-    context.install(rune_modules::process::module(false)?)?;
+
+    // `process` is the one library that can bypass everything this crate
+    // counts: a script that shells out can delete without a `remove_*` call and
+    // without a rule the user can see. It is installed only when the user said
+    // yes, so a script that needs it fails to load, loudly, on a machine where
+    // nobody allowed it.
+    if session::process_allowed() {
+        context.install(rune_modules::process::module(false)?)?;
+    }
 
     context.install(module()?)?;
     // `cleaner::registry` lives in its own file because `#[rune::module]`
@@ -97,6 +110,17 @@ pub fn module() -> Result<Module, ContextError> {
     module.function_meta(parent)?;
     module.function_meta(filename)?;
     module.function_meta(expand)?;
+    module.function_meta(is_protected)?;
+    module.function_meta(running)?;
+
+    // The run the handler is part of.
+    module.function_meta(cancelled)?;
+    module.function_meta(dry_run)?;
+    module.function_meta(progress)?;
+    module.function_meta(notify)?;
+    module.function_meta(version)?;
+    module.function_meta(require_api)?;
+    module.function_meta(script_path)?;
 
     module.function_meta(remove_all)?;
     module.function_meta(remove_files)?;
@@ -119,12 +143,16 @@ pub fn module() -> Result<Module, ContextError> {
 
     // The report a finished hook receives.
     module.ty::<ProgramReport>()?;
+    module.ty::<CategoryReport>()?;
     module.ty::<Report>()?;
     module.function_meta(ProgramReport::categories)?;
     module.function_meta(ProgramReport::in_category)?;
     module.function_meta(ProgramReport::size)?;
     module.function_meta(ProgramReport::line)?;
+    module.function_meta(CategoryReport::size)?;
     module.function_meta(Report::entries)?;
+    module.function_meta(Report::categories)?;
+    module.function_meta(Report::incomplete)?;
     module.function_meta(Report::summary)?;
     module.function_meta(Report::details)?;
     module.function_meta(Report::size)?;
@@ -138,6 +166,14 @@ pub fn module() -> Result<Module, ContextError> {
     module.function_meta(FileCleaner::class)?;
     module.function_meta(FileCleaner::path)?;
     module.function_meta(FileCleaner::os)?;
+    module.function_meta(FileCleaner::paths)?;
+    module.function_meta(FileCleaner::exclude)?;
+    module.function_meta(FileCleaner::older_than)?;
+    module.function_meta(FileCleaner::min_size)?;
+    module.function_meta(FileCleaner::max_size)?;
+    module.function_meta(FileCleaner::max_depth)?;
+    module.function_meta(FileCleaner::skip_if_running)?;
+    module.function_meta(FileCleaner::to_trash)?;
     module.function_meta(FileCleaner::files_to_remove)?;
     module.function_meta(FileCleaner::directories_to_remove)?;
     module.function_meta(FileCleaner::remove_all_in_dir)?;
@@ -166,6 +202,8 @@ pub fn module() -> Result<Module, ContextError> {
     module.function_meta(CustomCleanerBuilder::category)?;
     module.function_meta(CustomCleanerBuilder::sub_category)?;
     module.function_meta(CustomCleanerBuilder::path)?;
+    module.function_meta(CustomCleanerBuilder::paths)?;
+    module.function_meta(CustomCleanerBuilder::within)?;
     module.function_meta(CustomCleanerBuilder::os)?;
     module.function_meta(CustomCleanerBuilder::handler)?;
     module.function_meta(CustomCleanerBuilder::glob)?;
@@ -174,6 +212,105 @@ pub fn module() -> Result<Module, ContextError> {
     module.function_meta(CustomCleanerBuilder::register)?;
 
     Ok(module)
+}
+
+// --- the run a handler is part of -----------------------------------------
+
+/// Whether the user asked the run to stop.
+///
+/// Cancelling is cooperative: the engine stops starting new cleaners, and a
+/// handler that walks a large tree should check this between directories rather
+/// than finish work nobody is waiting for any more.
+///
+/// ```rune
+/// pub fn clean(path) {
+///     for entry in cleaner::list(path) {
+///         if cleaner::cancelled() {
+///             return;
+///         }
+///         // ...
+///     }
+/// }
+/// ```
+#[rune::function]
+fn cancelled() -> bool {
+    session::cancelled()
+}
+
+/// Whether this run only measures: the handler is being asked what it *would*
+/// remove, and nothing it deletes survives.
+///
+/// `remove_*` refuses every call while this is true and counts nothing, so a
+/// handler written for a real run answers a preview with `0` unless it checks
+/// here and reports what it found instead.
+#[rune::function]
+fn dry_run() -> bool {
+    session::dry_run()
+}
+
+/// Says what the handler is doing, in the place the frontend shows progress.
+///
+/// The text is a plain line (`"My App: checking 1200 files"`), not a percentage:
+/// the engine owns the counters and a script's own idea of its progress is not
+/// something it can add to them.
+#[rune::function]
+fn progress(text: &str) {
+    session::progress(text);
+}
+
+/// Shows a desktop notification with `title` and `body`.
+///
+/// The same notification the app itself shows, on every platform, without a
+/// script calling `notify-send` or `powershell`. Safe to call from a finished
+/// hook: it does not block the cleaning job.
+#[rune::function]
+fn notify(title: &str, body: &str) {
+    session::notify(title, body);
+}
+
+/// The Cross Cleaner version running the script, e.g. `"2.0.4.2.1"`.
+#[rune::function]
+fn version() -> String {
+    session::version()
+}
+
+/// Fails when the build's script API is older than `level`.
+///
+/// Call it first in `main()`: a script written against a newer API otherwise
+/// fails with "item not found", which reads as a broken script rather than an
+/// old build.
+#[rune::function]
+fn require_api(level: u64) -> Result<(), String> {
+    session::require_api(level)
+}
+
+/// The script file whose handler is running.
+///
+/// For a `User-Agent`, a log line or a message that says *which* of several
+/// scripts reported, without the script hard-coding its own name.
+#[rune::function]
+fn script_path() -> Option<String> {
+    session::script_path()
+}
+
+/// Whether `path` is a system location a cleaner should not remove.
+///
+/// `true` for the Windows directory, the program files, the user's home itself,
+/// the system directories, and for anything that contains one of them. It is a
+/// question, not a wall: checking it before a `remove_all` turns "the path was
+/// built wrong" into a refusal instead of a reinstall.
+#[rune::function]
+fn is_protected(path: &str) -> bool {
+    files::is_protected(path)
+}
+
+/// Whether any of `programs` is running right now.
+///
+/// The same check a rule's `skip_if_running` makes, so a handler and a rule
+/// agree on what "the browser is open" means.
+#[rune::function]
+fn running(programs: Vec<String>) -> bool {
+    files::running(programs)
 }
 
 // --- results ---------------------------------------------------------------
@@ -605,10 +742,22 @@ pub struct FileCleaner {
     sub_category: String,
     class: String,
     path: String,
+    /// Additional paths, so one rule can cover several places without the
+    /// script registering the same rule three times under one name.
+    extra_paths: Vec<String>,
     os: Vec<String>,
     files_to_remove: Vec<String>,
     directories_to_remove: Vec<String>,
     flags: u8,
+    /// Selection rules, applied per file by the engine.
+    exclude: Vec<String>,
+    older_than_days: Option<u64>,
+    min_size: Option<u64>,
+    max_size: Option<u64>,
+    max_depth: Option<u32>,
+    skip_if_running: Vec<String>,
+    /// Move what is removed to the recycle bin instead of deleting it.
+    to_trash: bool,
 }
 
 /// Starts a file and folder rule for `program`.
@@ -616,14 +765,22 @@ pub struct FileCleaner {
 fn file_cleaner(program: &str) -> FileCleaner {
     FileCleaner {
         program: program.to_owned(),
-        category: String::from("Other"),
+        category: String::new(),
         sub_category: String::new(),
         class: String::from("Other"),
         path: String::new(),
+        extra_paths: Vec::new(),
         os: Vec::new(),
         files_to_remove: Vec::new(),
         directories_to_remove: Vec::new(),
         flags: 0,
+        exclude: Vec::new(),
+        older_than_days: None,
+        min_size: None,
+        max_size: None,
+        max_depth: None,
+        skip_if_running: Vec::new(),
+        to_trash: false,
     }
 }
 
@@ -662,6 +819,112 @@ impl FileCleaner {
     #[rune::function(instance)]
     fn os(&mut self, values: Vec<String>) -> Self {
         self.os = values;
+        self.clone()
+    }
+
+    /// Cleans several paths with one rule.
+    ///
+    /// Each path becomes its own database entry, but they share the program,
+    /// the category and the selection rules — the shape the database has for a
+    /// program that keeps its cache in two places.
+    ///
+    /// ```rune
+    /// cleaner::file_cleaner("My App")
+    ///     .category("Cache")
+    ///     .paths(["{username}/AppData/Local/My App/Cache",
+    ///             "{username}/AppData/Local/My App/GPUCache"])
+    ///     .remove_all_in_dir()
+    ///     .register();
+    /// ```
+    #[rune::function(instance)]
+    fn paths(&mut self, values: Vec<String>) -> Self {
+        self.extra_paths = values;
+        self.clone()
+    }
+
+    /// Never touches these names, even when they match the pattern.
+    ///
+    /// A pattern is matched against both the full path and the bare name, so
+    /// `"*.lock"` protects a lock file anywhere in the tree and `"user-data"`
+    /// protects a directory of that name with everything inside it.
+    #[rune::function(instance)]
+    fn exclude(&mut self, values: Vec<String>) -> Self {
+        self.exclude = values;
+        self.clone()
+    }
+
+    /// Only removes files last modified at least `days` days ago.
+    ///
+    /// A file whose modification time cannot be read is left alone: "older than
+    /// a week" cannot be proven, and this filter exists to prevent deleting on a
+    /// guess. This is the declarative form of `cleaner::older_than` — use the
+    /// method when the whole rule can decide by age, the function inside a
+    /// `clean` handler when it cannot.
+    #[rune::function(instance)]
+    fn older_than(&mut self, days: u64) -> Self {
+        self.older_than_days = Some(days);
+        self.clone()
+    }
+
+    /// Only removes files at least `size` large, e.g. `"10 MB"`.
+    ///
+    /// The size is a number plus one of `B`, `KB`, `MB`, `GB`, `TB`; a bare
+    /// number means bytes. Both binary (1024) and decimal-looking sizes are
+    /// read as the same unit the sizes in the app are shown in.
+    #[rune::function(instance)]
+    fn min_size(&mut self, size: &str) -> Self {
+        match parse_size(size) {
+            Some(bytes) => self.min_size = Some(bytes),
+            None => collect::error(format!(
+                "file cleaner {}: min_size({size:?}) is not a size",
+                display_name(&self.program)
+            )),
+        }
+        self.clone()
+    }
+
+    /// Only removes files at most `size` large, e.g. `"512 KB"`.
+    #[rune::function(instance)]
+    fn max_size(&mut self, size: &str) -> Self {
+        match parse_size(size) {
+            Some(bytes) => self.max_size = Some(bytes),
+            None => collect::error(format!(
+                "file cleaner {}: max_size({size:?}) is not a size",
+                display_name(&self.program)
+            )),
+        }
+        self.clone()
+    }
+
+    /// How deep the walk may go, counting the entries directly inside the path
+    /// as depth 1.
+    ///
+    /// A rule for `node_modules` almost never means "and every nested copy of
+    /// it"; a depth keeps one runaway tree from being walked forever.
+    #[rune::function(instance)]
+    fn max_depth(&mut self, depth: u32) -> Self {
+        self.max_depth = Some(depth);
+        self.clone()
+    }
+
+    /// Skips the whole rule while any of these programs is running.
+    ///
+    /// Cleaning a browser cache under a running browser mostly just makes the
+    /// browser write everything back on its next tick.
+    #[rune::function(instance)]
+    fn skip_if_running(&mut self, programs: Vec<String>) -> Self {
+        self.skip_if_running = programs;
+        self.clone()
+    }
+
+    /// Moves what is removed to the recycle bin instead of deleting it.
+    ///
+    /// Right for a user's own documents and project caches, where being able to
+    /// undo the cleaning matters; the built-in catalog deletes, because system
+    /// junk is not worth a trip through the bin.
+    #[rune::function(instance)]
+    fn to_trash(&mut self) -> Self {
+        self.to_trash = true;
         self.clone()
     }
 
@@ -717,15 +980,26 @@ impl FileCleaner {
         }
 
         match self.build() {
-            Ok(entry) => collect::file(entry),
+            Ok(entries) => {
+                for entry in entries {
+                    collect::file(entry);
+                }
+            }
             Err(message) => collect::error(message),
         }
     }
 
-    fn build(&self) -> Result<CleanerData, String> {
+    fn build(&self) -> Result<Vec<CleanerData>, String> {
         let name = display_name(&self.program);
 
-        if self.path.trim().is_empty() {
+        if self.category.trim().is_empty() {
+            return Err(format!(
+                "file cleaner {name}: category(...) is required - it is what the user \
+                 selects to include this cleaner"
+            ));
+        }
+
+        if self.path.trim().is_empty() && self.extra_paths.is_empty() {
             return Err(format!("file cleaner {name}: path(...) is required"));
         }
 
@@ -741,25 +1015,91 @@ impl FileCleaner {
             ));
         }
 
-        Ok(CleanerData {
-            path: SharedPath::new(&self.path),
-            category: self.category.as_str().into(),
-            program: self.program.as_str().into(),
-            class: self.class.as_str().into(),
-            sub_category: self.sub_category.as_str().into(),
-            files_to_remove: self
-                .files_to_remove
+        if self.older_than_days == Some(0) {
+            return Err(format!(
+                "file cleaner {name}: older_than(0) would match every file"
+            ));
+        }
+
+        let filter = CleanerFilter {
+            exclude: self
+                .exclude
                 .iter()
-                .map(|value| value.as_str().into())
+                .map(|value| Arc::<str>::from(value.as_str()))
                 .collect(),
-            directories_to_remove: self
-                .directories_to_remove
+            older_than_seconds: self.older_than_days.map(|days| days.saturating_mul(86_400)),
+            min_size: self.min_size,
+            max_size: self.max_size,
+            max_depth: self.max_depth,
+            skip_if_running: self
+                .skip_if_running
                 .iter()
-                .map(|value| value.as_str().into())
+                .map(|value| Arc::<str>::from(value.as_str()))
                 .collect(),
-            flags,
-        })
+            to_trash: self.to_trash,
+        };
+
+        let mut paths = Vec::with_capacity(1 + self.extra_paths.len());
+
+        if !self.path.trim().is_empty() {
+            paths.push(self.path.clone());
+        }
+
+        paths.extend(self.extra_paths.iter().cloned());
+
+        Ok(paths
+            .into_iter()
+            .map(|path| CleanerData {
+                path: SharedPath::new(&path),
+                category: self.category.as_str().into(),
+                program: self.program.as_str().into(),
+                class: self.class.as_str().into(),
+                sub_category: self.sub_category.as_str().into(),
+                files_to_remove: self
+                    .files_to_remove
+                    .iter()
+                    .map(|value| value.as_str().into())
+                    .collect(),
+                directories_to_remove: self
+                    .directories_to_remove
+                    .iter()
+                    .map(|value| value.as_str().into())
+                    .collect(),
+                flags,
+                filter: filter.clone(),
+            })
+            .collect())
     }
+}
+
+/// Reads `"10 MB"`, `"512KB"` or `"123"` into bytes.
+///
+/// The units are the ones the app prints sizes in, and both `KB` and `KiB`
+/// mean 1024: a size in a rule is a threshold, not an accounting figure, and
+/// accepting both spellings is friendlier than refusing one.
+fn parse_size(text: &str) -> Option<u64> {
+    let text = text.trim();
+    let split = text
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(text.len());
+
+    let (number, unit) = text.split_at(split);
+    let number: f64 = number.parse().ok()?;
+
+    if !number.is_finite() || number < 0.0 {
+        return None;
+    }
+
+    let multiplier = match unit.trim().to_ascii_lowercase().as_str() {
+        "" | "b" => 1.0,
+        "kb" | "kib" => 1024.0,
+        "mb" | "mib" => 1024.0 * 1024.0,
+        "gb" | "gib" => 1024.0 * 1024.0 * 1024.0,
+        "tb" | "tib" => 1024.0 * 1024.0 * 1024.0 * 1024.0,
+        _ => return None,
+    };
+
+    Some((number * multiplier) as u64)
 }
 
 /// A registry rule, declared with the same chainable shape as a file rule and
@@ -795,7 +1135,7 @@ pub struct RegistryCleaner {
 fn registry_cleaner(program: &str) -> RegistryCleaner {
     RegistryCleaner {
         program: program.to_owned(),
-        category: String::from("Other"),
+        category: String::new(),
         sub_category: String::new(),
         class: String::from("Other"),
         path: String::new(),
@@ -907,6 +1247,13 @@ impl RegistryCleaner {
             return Err(format!("registry cleaner {name}: path(...) is required"));
         }
 
+        if self.category.trim().is_empty() {
+            return Err(format!(
+                "registry cleaner {name}: category(...) is required - it is what the user \
+                 selects to include this cleaner"
+            ));
+        }
+
         let has_action = self.remove_all_in_tree
             || self.remove_all_in_registry
             || !self.values_to_remove.is_empty()
@@ -1009,10 +1356,13 @@ pub struct CustomCleanerBuilder {
     category: String,
     sub_category: String,
     path: String,
+    /// Additional paths for the same handler, one call per path.
+    extra_paths: Vec<String>,
     os: Vec<String>,
     handler: String,
     glob: bool,
     sequential: bool,
+    within: String,
 }
 
 /// Starts a script-driven cleaner for `program`.
@@ -1021,13 +1371,15 @@ fn custom_cleaner(program: &str) -> CustomCleanerBuilder {
     CustomCleanerBuilder {
         id: String::new(),
         program: program.to_owned(),
-        category: String::from("Other"),
+        category: String::new(),
         sub_category: String::new(),
         path: String::new(),
+        extra_paths: Vec::new(),
         os: Vec::new(),
         handler: String::from("clean"),
         glob: false,
         sequential: false,
+        within: String::new(),
     }
 }
 
@@ -1057,6 +1409,40 @@ impl CustomCleanerBuilder {
     #[rune::function(instance)]
     fn os(&mut self, values: Vec<String>) -> Self {
         self.os = values;
+        self.clone()
+    }
+
+    /// Additional paths for the same handler.
+    ///
+    /// The handler is called once per path, and everything it removes still
+    /// folds under one program in the results. Use it instead of registering the
+    /// same cleaner three times under one name.
+    #[rune::function(instance)]
+    fn paths(&mut self, values: Vec<String>) -> Self {
+        self.extra_paths = values;
+        self.clone()
+    }
+
+    /// A fence for everything the handler removes.
+    ///
+    /// With it set, every `cleaner::remove_*` call that resolves outside `root`
+    /// is refused instead of performed — the handler still runs, but a path built
+    /// by a buggy `join` cannot turn "clean my app's cache" into "clean the
+    /// disk". Deletions inside the fence count and report as usual.
+    ///
+    /// ```rune
+    /// let root = cleaner::join([cleaner::user(), "AppData", "Local", "My App"]);
+    ///
+    /// cleaner::custom_cleaner("My App")
+    ///     .category("Cache")
+    ///     .path(root)
+    ///     .within(root)          // nothing outside My App can be removed
+    ///     .handler("clean_mine")
+    ///     .register();
+    /// ```
+    #[rune::function(instance)]
+    fn within(&mut self, root: &str) -> Self {
+        self.within = root.to_owned();
         self.clone()
     }
 
@@ -1097,7 +1483,7 @@ impl CustomCleanerBuilder {
             return;
         }
 
-        if self.path.trim().is_empty() {
+        if self.path.trim().is_empty() && self.extra_paths.is_empty() {
             collect::error(format!(
                 "custom cleaner {}: path(...) is required",
                 display_name(&self.program)
@@ -1105,21 +1491,56 @@ impl CustomCleanerBuilder {
             return;
         }
 
-        collect::custom(CustomDefinition {
-            id: if self.id.is_empty() {
-                self.program.clone()
-            } else {
-                self.id.clone()
-            },
-            program: self.program.clone(),
-            category: self.category.clone(),
-            sub_category: self.sub_category.clone(),
-            path: self.path.clone(),
-            os: self.os.clone(),
-            handler: self.handler.clone(),
-            glob: self.glob,
-            sequential: self.sequential,
-        });
+        if self.category.trim().is_empty() {
+            collect::error(format!(
+                "custom cleaner {}: category(...) is required - it is what the user \
+                 selects to include this cleaner",
+                display_name(&self.program)
+            ));
+            return;
+        }
+
+        let base = if self.id.is_empty() {
+            self.program.clone()
+        } else {
+            self.id.clone()
+        };
+
+        let within = if self.within.trim().is_empty() {
+            None
+        } else {
+            Some(self.within.clone())
+        };
+
+        // One entry per path: the engine calls the handler once per entry, so a
+        // handler that cleans one directory needs no loop over `paths()` of its
+        // own, and the results still fold under one program.
+        let paths = std::iter::once(&self.path)
+            .filter(|path| !path.trim().is_empty())
+            .chain(
+                self.extra_paths
+                    .iter()
+                    .filter(|path| !path.trim().is_empty()),
+            );
+
+        for (index, path) in paths.enumerate() {
+            collect::custom(CustomDefinition {
+                id: if index == 0 {
+                    base.clone()
+                } else {
+                    format!("{base}#{index}")
+                },
+                program: self.program.clone(),
+                category: self.category.clone(),
+                sub_category: self.sub_category.clone(),
+                path: path.clone(),
+                os: self.os.clone(),
+                handler: self.handler.clone(),
+                glob: self.glob,
+                sequential: self.sequential,
+                within: within.clone(),
+            });
+        }
     }
 }
 
@@ -1214,6 +1635,22 @@ pub struct Report {
     /// How many programs contributed to the run.
     #[rune(get)]
     pub programs: u64,
+    /// Files the run could not remove because something still held them open.
+    ///
+    /// A run that reports these is not necessarily a failure — one locked file
+    /// in a cache is normal — but a script that wants to warn about it can read
+    /// the number instead of parsing the one-line problem it gets in `on_error`.
+    #[rune(get)]
+    pub locked_files: u64,
+    /// How much the locked files were worth, in bytes.
+    #[rune(get)]
+    pub locked_bytes: u64,
+    /// Files the run could not remove because it was not allowed to.
+    #[rune(get)]
+    pub denied_files: u64,
+    /// How much the denied files were worth, in bytes.
+    #[rune(get)]
+    pub denied_bytes: u64,
     /// When the run started, in seconds since the Unix epoch.
     ///
     /// `0` when the start was not recorded — a frontend that never called
@@ -1226,11 +1663,38 @@ pub struct Report {
     pub duration: u64,
     /// One entry per program, largest first.
     entries: Vec<ProgramReport>,
+    /// One entry per category, largest first.
+    categories: Vec<CategoryReport>,
     // Read by scripts through the getters below; unreachable for the compiler.
     #[allow(dead_code)]
     summary: String,
     #[allow(dead_code)]
     details: String,
+}
+
+/// What one category contributed to a finished run.
+#[derive(Debug, Clone, Any)]
+pub struct CategoryReport {
+    /// The category's name, e.g. `"Cache"`.
+    #[rune(get)]
+    pub category: String,
+    #[rune(get)]
+    pub files: u64,
+    #[rune(get)]
+    pub folders: u64,
+    #[rune(get)]
+    pub bytes: u64,
+    // Read through `size()`; unreachable for the compiler.
+    #[allow(dead_code)]
+    size: String,
+}
+
+impl CategoryReport {
+    /// The size as a human string, e.g. `"1.2 GB"`.
+    #[rune::function(instance)]
+    fn size(&self) -> String {
+        self.size.clone()
+    }
 }
 
 impl Report {
@@ -1276,17 +1740,56 @@ impl Report {
             .cloned()
             .collect()
     }
+
+    /// One entry per category, largest first — what a per-category message
+    /// needs (`"Cache: 1.2 GB, Logs: 300 MB"`).
+    #[rune::function(instance)]
+    fn categories(&self) -> Vec<CategoryReport> {
+        self.categories.clone()
+    }
+
+    /// Whether the run left anything behind that it was not allowed to remove.
+    #[rune::function(instance)]
+    fn incomplete(&self) -> bool {
+        self.denied_files > 0 || self.locked_files > 0
+    }
+}
+
+/// The totals a finished run reports, in the one shape both hooks take.
+///
+/// The frontends pass these straight through from the cleaning job; keeping
+/// them together is what stops `notify_finished` and `notify_failed` from
+/// drifting apart in the numbers they show.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RunTotals {
+    pub bytes: u64,
+    pub files: u64,
+    pub folders: u64,
+    /// Files the run could not remove because something held them open.
+    pub locked_files: u64,
+    pub locked_bytes: u64,
+    /// Files the run was not allowed to remove.
+    pub denied_files: u64,
+    pub denied_bytes: u64,
 }
 
 /// Builds the report from a finished run.
 pub(crate) fn report(
-    bytes: u64,
-    files: u64,
-    folders: u64,
+    totals: RunTotals,
     cleared: &[Cleared],
     started_at: u64,
     duration: u64,
 ) -> Report {
+    let RunTotals {
+        bytes,
+        files,
+        folders,
+        locked_files,
+        locked_bytes,
+        denied_files,
+        denied_bytes,
+    } = totals;
+
     // Programs appear once per category, so the rows are folded: a program
     // cleaned under two categories is one entry listing both, not two entries
     // that each hold half the numbers.
@@ -1325,6 +1828,37 @@ pub(crate) fn report(
             .then_with(|| a.program.cmp(&b.program))
     });
 
+    // One row per category. The per-category shares are what `Cleared` carries
+    // for this purpose: splitting a program's total by its categories instead
+    // would divide the bytes by guesswork.
+    let mut categories: BTreeMap<&str, (u64, u64, u64)> = BTreeMap::new();
+
+    for entry in cleared {
+        for total in &entry.category_totals {
+            let row = categories.entry(total.category.as_str()).or_default();
+            row.0 += total.files;
+            row.1 += total.folders;
+            row.2 += total.bytes;
+        }
+    }
+
+    let mut categories: Vec<CategoryReport> = categories
+        .into_iter()
+        .map(|(category, (files, folders, bytes))| CategoryReport {
+            category: category.to_owned(),
+            files,
+            folders,
+            bytes,
+            size: database::utils::get_file_size_string(bytes),
+        })
+        .collect();
+
+    categories.sort_by(|a, b| {
+        b.bytes
+            .cmp(&a.bytes)
+            .then_with(|| a.category.cmp(&b.category))
+    });
+
     let summary = format!(
         "Cross Cleaner freed {}: {} files, {} folders in {} programs.",
         database::utils::get_file_size_string(bytes),
@@ -1344,9 +1878,14 @@ pub(crate) fn report(
         folders,
         bytes,
         programs: entries.len() as u64,
+        locked_files,
+        locked_bytes,
+        denied_files,
+        denied_bytes,
         started_at,
         duration,
         entries,
+        categories,
         summary,
         details,
     }

@@ -6,6 +6,7 @@
 //! accepts.
 
 use appcore::AppState;
+use appcore::scripts::{ScriptSummary, load};
 
 use crate::args::OutputArgs;
 use crate::plan;
@@ -177,5 +178,115 @@ pub fn dry_run(state: &AppState, ui: &Ui, output: &OutputArgs, paths: bool) {
             ));
             ui.line(&format!("    {}", entry.path));
         }
+    }
+}
+
+/// Prints the scripts that were found and what each of them declared.
+///
+/// The question it answers is the one a broken script leaves behind: the user
+/// wrote a cleaner, nothing appeared in `cli categories`, and the only trace is
+/// a line in the diagnostic log. Here the file, its counts and the error are in
+/// one place, and the exit code says whether anything failed.
+pub fn scripts(ui: &Ui, output: &OutputArgs, check: bool) -> bool {
+    let scripts = load();
+    let reports = if check {
+        // A fresh read, not the cached one: `--check` exists to answer "what
+        // does the file say *now*", after the user fixed it.
+        appcore::scripts::load_from(&scripts.directory)
+    } else {
+        appcore::scripts::load().clone()
+    };
+
+    let failed = reports.reports.iter().filter(|r| r.error.is_some()).count();
+
+    if output.json {
+        ui.print_json(
+            &serde_json::json!({
+                "directory": reports.directory.to_string_lossy(),
+                "scripts": reports.reports.iter().map(|script| serde_json::json!({
+                    "path": script.path.to_string_lossy(),
+                    "files": script.files,
+                    "registry": script.registry,
+                    "custom": script.custom,
+                    "hooks": script.hooks,
+                    "complaints": script.complaints,
+                    "error": script.error,
+                })).collect::<Vec<_>>(),
+                "problems": reports.errors.iter().map(|error| error.to_string()).collect::<Vec<_>>(),
+            })
+            .to_string(),
+        );
+
+        return failed == 0;
+    }
+
+    if output.quiet {
+        return failed == 0;
+    }
+
+    ui.line(&ui.bold(&format!(
+        "{} in {}",
+        count(reports.reports.len() as u64, "script"),
+        reports.directory.display()
+    )));
+
+    if reports.reports.is_empty() {
+        ui.line(&ui.dim("No scripts. Drop a .rn file there and run this again."));
+        return true;
+    }
+
+    for script in &reports.reports {
+        print_script(ui, script);
+    }
+
+    if failed > 0 {
+        ui.line("");
+        ui.line(&ui.warn(&format!(
+            "{} did not load. Nothing they declared is in the list.",
+            count(failed as u64, "script")
+        )));
+    }
+
+    failed == 0
+}
+
+fn print_script(ui: &Ui, script: &ScriptSummary) {
+    let name = script
+        .path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| script.path.to_string_lossy().into_owned());
+
+    let loaded = script.error.is_none();
+    ui.line(&format!(
+        "  {} {}",
+        if loaded {
+            ui.bold(&name)
+        } else {
+            ui.warn(&name)
+        },
+        ui.dim(&format!(
+            "{} file, {} registry, {} custom, {} hook{}",
+            script.files,
+            script.registry,
+            script.custom,
+            script.hooks,
+            if script.hooks == 1 { "" } else { "s" }
+        ))
+    ));
+
+    if let Some(error) = &script.error {
+        ui.line(&format!("    {}", ui.warn(error)));
+    }
+
+    if script.complaints > 0 {
+        ui.line(&format!(
+            "    {}",
+            ui.warn(&format!(
+                "{} declaration{} could not be used",
+                script.complaints,
+                if script.complaints == 1 { "" } else { "s" }
+            ))
+        ));
     }
 }

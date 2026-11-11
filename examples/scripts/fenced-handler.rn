@@ -1,0 +1,48 @@
+// A handler that deletes on its own, fenced so a path bug cannot leave the app's
+// directory, and polite enough to stop when the user asks.
+//
+// `within` is the one thing to add to every handler that removes by computed
+// path: it turns "a script wiped my drive" into "the rule did nothing".
+
+pub fn main() {
+    cleaner::custom_cleaner("My App")
+        .category("Cache")
+        .path("{username}/AppData/Local/My App/cache")
+        .handler("clean_cache")
+        // Whatever `clean_cache` decides to delete, this is as far as it may go.
+        .within("{username}/AppData/Local/My App")
+        .register();
+}
+
+pub fn clean_cache(path) {
+    let files = cleaner::glob(`${path}/**/*.tmp`);
+
+    if cleaner::dry_run() {
+        cleaner::log(`would remove ${files.len()} temp files`);
+        return;
+    }
+
+    let done = 0;
+
+    for file in files {
+        // A big tree takes long enough that the user may have given up.
+        if cleaner::cancelled() {
+            cleaner::warn(`stopped after ${done} files, on request`);
+            return;
+        }
+
+        // Belt and braces: `within` already refuses this, but a script that
+        // says why is easier to debug than one that silently deletes nothing.
+        if cleaner::is_protected(file) {
+            cleaner::warn(`skipping ${file}: protected`);
+            continue;
+        }
+
+        cleaner::remove_file(file);
+        done = done + 1;
+
+        if done % 500 == 0 {
+            cleaner::progress(`${done} of ${files.len()} temp files`);
+        }
+    }
+}

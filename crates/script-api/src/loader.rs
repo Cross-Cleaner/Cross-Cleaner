@@ -60,6 +60,10 @@ impl fmt::Display for ScriptError {
 impl std::error::Error for ScriptError {}
 
 /// Everything the scripts contributed, plus why some of them could not.
+///
+/// Not `Debug`: the rows are the database's own types, and a script's cleaner is
+/// a closure - `reports` is the printable view of the same load.
+#[derive(Clone)]
 pub struct Scripts {
     /// Declarative file and folder rules, to be layered over the cleaner
     /// database.
@@ -71,8 +75,34 @@ pub struct Scripts {
     /// Scripts that failed, in the order they were read. A script that failed
     /// contributes nothing: its registrations are rolled back.
     pub errors: Vec<ScriptError>,
+    /// One entry per script file, whether it loaded or not.
+    pub reports: Vec<ScriptSummary>,
     /// The directory these scripts came from.
     pub directory: PathBuf,
+}
+
+/// What one script declared, for `cli scripts` and any other listing.
+///
+/// A script that failed shows up with the error that stopped it and zero rules:
+/// "nothing was declared" and "the file is not there" look identical otherwise,
+/// and the second is the one a user has to fix.
+#[derive(Debug, Clone)]
+pub struct ScriptSummary {
+    /// The file the declarations came from.
+    pub path: PathBuf,
+    /// File and folder rules.
+    pub files: usize,
+    /// Registry rules.
+    pub registry: usize,
+    /// Custom cleaners with a handler.
+    pub custom: usize,
+    /// `on_started` / `on_finished` / `on_error` handlers.
+    pub hooks: usize,
+    /// Rules the script asked for but that could not be used, such as a
+    /// cleaner without a path.
+    pub complaints: usize,
+    /// Why the script did not load. `None` when it did.
+    pub error: Option<String>,
 }
 
 impl Default for Scripts {
@@ -82,6 +112,7 @@ impl Default for Scripts {
             registry: Vec::new(),
             custom: Vec::new(),
             errors: Vec::new(),
+            reports: Vec::new(),
             directory: PathBuf::new(),
         }
     }
@@ -99,6 +130,10 @@ struct ScriptProgram {
     unit: Arc<Unit>,
     handler: String,
     glob: bool,
+    /// Fence for the handler's removals; see `CustomCleanerBuilder::within`.
+    within: Option<String>,
+    /// The file this handler came from, for `cleaner::script_path()`.
+    script: String,
 }
 
 impl ScriptProgram {
@@ -107,11 +142,15 @@ impl ScriptProgram {
         let context = self.context.clone();
         let unit = self.unit.clone();
         let handler = self.handler.clone();
+        let within = self.within.clone();
         let path = path.to_string_lossy().into_owned();
+        let script = self.script.clone();
 
         drive(async move {
             remove::reset();
+            remove::set_within(within.as_deref());
             registry::reset();
+            crate::session::set_running_script(&script);
 
             let vm = Vm::new(context, unit);
             let execution = vm
@@ -140,8 +179,10 @@ impl ScriptProgram {
         let unit = self.unit.clone();
         let handler = self.handler.clone();
         let report = report.clone();
+        let script = self.script.clone();
 
         drive(async move {
+            crate::session::set_running_script(&script);
             let vm = Vm::new(context, unit);
             let execution = vm
                 .send_execute([handler.as_str()], (report,))
@@ -165,8 +206,10 @@ impl ScriptProgram {
         let context = self.context.clone();
         let unit = self.unit.clone();
         let handler = self.handler.clone();
+        let script = self.script.clone();
 
         drive(async move {
+            crate::session::set_running_script(&script);
             let vm = Vm::new(context, unit);
             let execution = vm
                 .send_execute([handler.as_str()], ())
@@ -189,8 +232,10 @@ impl ScriptProgram {
         let handler = self.handler.clone();
         let report = report.clone();
         let problem = problem.to_owned();
+        let script = self.script.clone();
 
         drive(async move {
+            crate::session::set_running_script(&script);
             let vm = Vm::new(context, unit);
             let execution = vm
                 .send_execute([handler.as_str()], (report, problem))
@@ -450,7 +495,7 @@ fn started() -> (u64, u64) {
 ///
 /// A frontend that is about to exit calls [`wait_for_hooks`] first, so a short
 /// webhook still gets out instead of dying with the process.
-pub fn notify_finished(bytes: u64, files: u64, folders: u64, cleared: &[Cleared]) {
+pub fn notify_finished(totals: api::RunTotals, cleared: &[Cleared]) {
     let hooks = hooks_of(HookKind::Finished);
 
     if hooks.is_empty() {
@@ -458,7 +503,7 @@ pub fn notify_finished(bytes: u64, files: u64, folders: u64, cleared: &[Cleared]
     }
 
     let (started_at, duration) = started();
-    let report = api::report(bytes, files, folders, cleared, started_at, duration);
+    let report = api::report(totals, cleared, started_at, duration);
 
     let handle = std::thread::spawn(move || {
         for hook in hooks {
@@ -486,7 +531,7 @@ pub fn notify_finished(bytes: u64, files: u64, folders: u64, cleared: &[Cleared]
 ///
 /// Hooks only exist if the scripts that declared them were loaded: a frontend
 /// with scripts disabled needs no separate guard.
-pub fn notify_failed(bytes: u64, files: u64, folders: u64, cleared: &[Cleared], problem: &str) {
+pub fn notify_failed(totals: api::RunTotals, cleared: &[Cleared], problem: &str) {
     let hooks = hooks_of(HookKind::Failed);
 
     if hooks.is_empty() {
@@ -494,7 +539,7 @@ pub fn notify_failed(bytes: u64, files: u64, folders: u64, cleared: &[Cleared], 
     }
 
     let (started_at, duration) = started();
-    let report = api::report(bytes, files, folders, cleared, started_at, duration);
+    let report = api::report(totals, cleared, started_at, duration);
     let problem = problem.to_owned();
 
     let handle = std::thread::spawn(move || {
@@ -613,6 +658,7 @@ fn build(directory: PathBuf) -> Scripts {
     for path in script_files(&directory) {
         collect::set_script(&path);
         let mark = collect::mark();
+        let errors_before = scripts.errors.len();
 
         match compile_and_run(&context, &runtime, &path) {
             Ok(unit) => {
@@ -626,6 +672,8 @@ fn build(directory: PathBuf) -> Scripts {
                             unit: unit.clone(),
                             handler: definition.handler.clone(),
                             glob: definition.glob,
+                            within: definition.within.clone(),
+                            script: path.to_string_lossy().into_owned(),
                         }),
                     );
 
@@ -642,6 +690,8 @@ fn build(directory: PathBuf) -> Scripts {
                             unit: unit.clone(),
                             handler: hook.handler,
                             glob: false,
+                            within: None,
+                            script: path.to_string_lossy().into_owned(),
                         }),
                     );
                 }
@@ -651,6 +701,22 @@ fn build(directory: PathBuf) -> Scripts {
                 scripts.errors.push(error);
             }
         }
+
+        let after = collect::counts();
+        let failure = scripts
+            .errors
+            .get(errors_before)
+            .map(|error| error.message.clone());
+
+        scripts.reports.push(ScriptSummary {
+            path: path.clone(),
+            files: after.files.saturating_sub(mark.files),
+            registry: after.registry.saturating_sub(mark.registry),
+            custom: after.custom.saturating_sub(mark.custom),
+            hooks: after.hooks.saturating_sub(mark.hooks),
+            complaints: after.errors.saturating_sub(mark.errors),
+            error: failure,
+        });
     }
 
     let collected = collect::finish();

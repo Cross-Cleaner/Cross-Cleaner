@@ -177,6 +177,162 @@ mod imp {
         key.enum_values().flatten().map(|(name, _)| name).collect()
     }
 
+    /// The name a value's type is written with: `REG_DWORD` and so on.
+    fn type_name(vtype: winreg::enums::RegType) -> &'static str {
+        use winreg::enums::RegType::{
+            REG_BINARY, REG_DWORD, REG_DWORD_BIG_ENDIAN, REG_EXPAND_SZ, REG_LINK, REG_MULTI_SZ,
+            REG_NONE, REG_QWORD, REG_RESOURCE_LIST, REG_SZ,
+        };
+
+        match vtype {
+            REG_NONE => "REG_NONE",
+            REG_SZ => "REG_SZ",
+            REG_EXPAND_SZ => "REG_EXPAND_SZ",
+            REG_BINARY => "REG_BINARY",
+            REG_DWORD => "REG_DWORD",
+            REG_DWORD_BIG_ENDIAN => "REG_DWORD_BIG_ENDIAN",
+            REG_LINK => "REG_LINK",
+            REG_MULTI_SZ => "REG_MULTI_SZ",
+            REG_RESOURCE_LIST => "REG_RESOURCE_LIST",
+            REG_QWORD => "REG_QWORD",
+            _ => "REG_UNKNOWN",
+        }
+    }
+
+    /// One value per row: name, type and text.
+    pub(crate) fn values_full(path: &str) -> Vec<(String, String, String)> {
+        let Some((_, root, rest)) = split(path) else {
+            return Vec::new();
+        };
+
+        let Ok(key) = root.open_subkey_with_flags(&rest, KEY_READ) else {
+            return Vec::new();
+        };
+
+        key.enum_values()
+            .flatten()
+            .map(|(name, value)| {
+                let kind = type_name(value.vtype.clone());
+                let shown = match value.vtype {
+                    winreg::enums::RegType::REG_DWORD if value.bytes.len() == 4 => {
+                        let bytes: [u8; 4] = value.bytes[..4].try_into().unwrap_or_default();
+                        u32::from_le_bytes(bytes).to_string()
+                    }
+                    winreg::enums::RegType::REG_QWORD if value.bytes.len() == 8 => {
+                        let bytes: [u8; 8] = value.bytes[..8].try_into().unwrap_or_default();
+                        u64::from_le_bytes(bytes).to_string()
+                    }
+                    _ => key
+                        .get_value::<String, _>(&name)
+                        .unwrap_or_else(|_| format!("<{} bytes>", value.bytes.len())),
+                };
+
+                (name, kind.to_owned(), shown)
+            })
+            .collect()
+    }
+
+    /// The key and everything under it as a `.reg` file's text.
+    ///
+    /// Writes the format `regedit` imports, so a script can save a key before
+    /// deleting it and the user can restore it by double-clicking the file.
+    /// Values keep their type; binary data is written as `hex:`.
+    pub(crate) fn export(path: &str) -> String {
+        let Some((_, root, rest)) = split(path) else {
+            return String::new();
+        };
+
+        let Ok(key) = root.open_subkey_with_flags(&rest, KEY_READ) else {
+            return String::new();
+        };
+
+        let mut text = String::from("Windows Registry Editor Version 5.00\r\n");
+        write_key(&mut text, path.trim(), &key);
+
+        text
+    }
+
+    fn write_key(text: &mut String, path: &str, key: &RegKey) {
+        text.push_str(&format!("\r\n[{path}]\r\n"));
+
+        for (name, value) in key.enum_values().flatten() {
+            let shown = match value.vtype {
+                winreg::enums::RegType::REG_SZ | winreg::enums::RegType::REG_EXPAND_SZ => {
+                    match key.get_value::<String, _>(&name) {
+                        Ok(string) => format!("\"{}\"", escape(&string)),
+                        Err(_) => continue,
+                    }
+                }
+                winreg::enums::RegType::REG_DWORD if value.bytes.len() == 4 => {
+                    let bytes: [u8; 4] = value.bytes[..4].try_into().unwrap_or_default();
+                    format!("dword:{:08x}", u32::from_le_bytes(bytes))
+                }
+                winreg::enums::RegType::REG_QWORD if value.bytes.len() == 8 => {
+                    let bytes: [u8; 8] = value.bytes[..8].try_into().unwrap_or_default();
+                    let digits: Vec<String> = u64::from_le_bytes(bytes)
+                        .to_le_bytes()
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect();
+                    format!("hex(b):{}", digits.join(","))
+                }
+                _ => {
+                    let digits: Vec<String> = value
+                        .bytes
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect();
+                    format!("hex:{}", digits.join(","))
+                }
+            };
+
+            text.push_str(&format!("\"{}\"={shown}\r\n", escape(&name)));
+        }
+
+        if let Ok(names) = key.enum_keys().collect::<Result<Vec<String>, _>>() {
+            for name in names {
+                if let Ok(child) = key.open_subkey_with_flags(&name, KEY_READ) {
+                    write_key(text, &format!("{path}\\{name}"), &child);
+                }
+            }
+        }
+    }
+
+    /// Escapes a name or a string the way a `.reg` file expects.
+    fn escape(value: &str) -> String {
+        value.replace('\\', "\\\\").replace('"', "\\\"")
+    }
+
+    pub(crate) fn write_dword(path: &str, name: &str, value: u32) -> bool {
+        let Some((_, root, rest)) = split(path) else {
+            return false;
+        };
+
+        match root.create_subkey(&rest) {
+            Ok((key, _)) => key.set_value(name, &value).is_ok(),
+            Err(_) => false,
+        }
+    }
+
+    pub(crate) fn write_binary(path: &str, name: &str, value: &[u8]) -> bool {
+        let Some((_, root, rest)) = split(path) else {
+            return false;
+        };
+
+        match root.create_subkey(&rest) {
+            Ok((key, _)) => key
+                .set_raw_value(
+                    name,
+                    &winreg::RegValue {
+                        bytes: value.to_vec().into(),
+                        vtype: winreg::enums::RegType::REG_BINARY,
+                    },
+                )
+                .is_ok(),
+            Err(_) => false,
+        }
+    }
+
     pub(crate) fn keys(path: &str) -> Vec<String> {
         let Some((_, root, rest)) = split(path) else {
             return Vec::new();
@@ -237,6 +393,23 @@ mod imp {
     // but never touch anything. A script that mentions the registry stays
     // portable instead of failing to load on Linux and macOS.
 
+    /// The values with their type, as `(name, type, text)`.
+    pub(crate) fn values_full(_path: &str) -> Vec<(String, String, String)> {
+        Vec::new()
+    }
+
+    pub(crate) fn export(_path: &str) -> String {
+        String::new()
+    }
+
+    pub(crate) fn write_dword(_path: &str, _name: &str, _value: u32) -> bool {
+        false
+    }
+
+    pub(crate) fn write_binary(_path: &str, _name: &str, _value: &[u8]) -> bool {
+        false
+    }
+
     pub(crate) fn exists(_path: &str) -> bool {
         false
     }
@@ -279,5 +452,6 @@ mod imp {
 }
 
 pub(crate) use imp::{
-    delete_key, delete_value, exists, keys, read, read_dword, read_qword, subkeys, values, write,
+    delete_key, delete_value, exists, export, keys, read, read_dword, read_qword, subkeys, values,
+    values_full, write, write_binary, write_dword,
 };

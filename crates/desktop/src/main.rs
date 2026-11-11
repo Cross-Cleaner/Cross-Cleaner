@@ -380,6 +380,9 @@ async fn run(backend: BackendChoice) -> eframe::Result {
 
     // INFO: Register all built-in custom cleanings (functions in cleaner::custom_cleaners)
     cleaner::custom_cleaners::register_all();
+    // INFO: What scripts may use (`process`) and where `notify` goes is decided
+    // before any of them is compiled.
+    appcore::scripts::init();
     // INFO: Scripts register theirs into the same registry, before it is read.
     appcore::scripts::register_custom_cleaners();
 
@@ -664,6 +667,7 @@ mod tests {
                 files_to_remove: vec![],
                 directories_to_remove: vec![],
                 flags: CleanerFlags::empty(),
+                filter: Default::default(),
             },
             CleanerData {
                 path: String::from("test/path2").into(),
@@ -674,6 +678,7 @@ mod tests {
                 files_to_remove: vec![],
                 directories_to_remove: vec![],
                 flags: CleanerFlags::empty(),
+                filter: Default::default(),
             },
         ];
 

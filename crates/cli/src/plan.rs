@@ -280,6 +280,7 @@ mod tests {
             files_to_remove: vec![],
             directories_to_remove: vec![],
             flags: CleanerFlags::empty(),
+            filter: Default::default(),
         }
     }
 

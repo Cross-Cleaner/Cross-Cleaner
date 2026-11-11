@@ -1,7 +1,9 @@
 // A finished hook that reports through the desktop instead of the network, and
 // shows the shapes the report can be read in.
 //
-// `process` and `time` come from rune-modules and are always installed.
+// `cleaner::notify` is the app's own notification, so this works on every
+// platform without knowing which one it is - and without `process`, which is
+// opt-in because a script that shells out can delete outside the engine.
 
 pub fn main() {
     cleaner::on_finished("report");
@@ -24,20 +26,10 @@ pub async fn report(run) {
     let cache = run.category("Cache");
     lines.push(format!("{} cache rows", cache.len()));
 
-    let title = "Cross Cleaner";
-    let message = lines.join("\n");
+    // How long the run took, for the line that says whether this was a slow one.
+    lines.push(format!("took {}s", run.duration()));
 
-    let command = process::Command::new(if cleaner::os() == "windows" {
-        "msg"
-    } else {
-        "notify-send"
-    });
-
-    command.arg(title);
-    command.arg(message);
-
-    let child = command.spawn()?;
-    child.wait().await?;
+    cleaner::notify("Cross Cleaner", lines.join("\n"));
 
     // A short pause, so two notifications in a row do not overlap.
     time::sleep(time::Duration::from_millis(250)).await?;
