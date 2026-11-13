@@ -97,13 +97,16 @@ pub struct ScriptSummary {
     pub registry: usize,
     /// Custom cleaners with a handler.
     pub custom: usize,
-    /// `on_started` / `on_finished` / `on_error` handlers.
+    /// Hook handlers: `on_started`, `on_scan`, `on_program_done`, `on_finished`,
+    /// `on_cancelled` and `on_error`.
     pub hooks: usize,
     /// Rules the script asked for but that could not be used, such as a
     /// cleaner without a path.
     pub complaints: usize,
     /// Why the script did not load. `None` when it did.
     pub error: Option<String>,
+    /// What the script said about itself with `cleaner::about`, if anything.
+    pub about: Option<collect::About>,
 }
 
 impl Default for Scripts {
@@ -123,6 +126,7 @@ impl Default for Scripts {
 struct Removed {
     stats: Stats,
     registry: Vec<String>,
+    failures: Vec<remove::Failure>,
 }
 
 /// A compiled script plus the handlers one of its registrations calls.
@@ -206,6 +210,7 @@ impl ScriptProgram {
                         Ok(Removed {
                             stats: remove::take(),
                             registry: registry::take(),
+                            failures: remove::take_failures(),
                         })
                     })
                 }))
@@ -215,6 +220,7 @@ impl ScriptProgram {
                     Ok(removed) => {
                         record(&mut result, &target, removed.stats);
                         record_registry(&mut result, removed.registry);
+                        record_failures(&mut result, removed.failures);
                     }
                     Err(message) => database::diag::warn(format!("{id}: {message}")),
                 }
@@ -231,6 +237,8 @@ impl ScriptProgram {
                 }
             }
         }));
+
+        crate::session::clear_running_script();
 
         result
     }
@@ -265,6 +273,70 @@ impl ScriptProgram {
     /// Called before the deletions begin, and synchronously: a hook that takes
     /// five seconds is meant to take five seconds, not to race the cleaning.
     fn started(&self) -> Result<(), String> {
+        let context = self.context.clone();
+        let unit = self.unit.clone();
+        let handler = self.handler.clone();
+        let script = self.script.clone();
+
+        drive(async move {
+            crate::session::set_running_script(&script);
+            let vm = Vm::new(context, unit);
+            let execution = vm
+                .send_execute([handler.as_str()], ())
+                .map_err(|error| format!("{handler}(): {error}"))?;
+
+            execution
+                .async_complete()
+                .await
+                .into_result()
+                .map_err(|error| format!("{handler}(): {error}"))?;
+
+            Ok(())
+        })
+    }
+
+    /// Runs an `on_scan` handler, with no arguments.
+    ///
+    /// Called before a scan starts. A scan is a preview: it deletes nothing, so
+    /// the handler is free to look around but must not prepare anything.
+    fn scan(&self) -> Result<(), String> {
+        self.no_args()
+    }
+
+    /// Runs an `on_cancelled` handler, with no arguments.
+    ///
+    /// Called once when the user stops a run, after the workers have stopped.
+    fn cancelled(&self) -> Result<(), String> {
+        self.no_args()
+    }
+
+    /// Runs an `on_program_done` handler with one program's report.
+    fn program_done(&self, report: &api::ProgramReport) -> Result<(), String> {
+        let context = self.context.clone();
+        let unit = self.unit.clone();
+        let handler = self.handler.clone();
+        let report = report.clone();
+        let script = self.script.clone();
+
+        drive(async move {
+            crate::session::set_running_script(&script);
+            let vm = Vm::new(context, unit);
+            let execution = vm
+                .send_execute([handler.as_str()], (report,))
+                .map_err(|error| format!("{handler}(): {error}"))?;
+
+            execution
+                .async_complete()
+                .await
+                .into_result()
+                .map_err(|error| format!("{handler}(): {error}"))?;
+
+            Ok(())
+        })
+    }
+
+    /// Runs the handler on a Rune VM with no arguments.
+    fn no_args(&self) -> Result<(), String> {
         let context = self.context.clone();
         let unit = self.unit.clone();
         let handler = self.handler.clone();
@@ -350,6 +422,39 @@ where
 
 static SCRIPTS: OnceLock<Scripts> = OnceLock::new();
 static NEXT_KEY: AtomicU64 = AtomicU64::new(0);
+
+/// Keys of the cleaners whose script touches the filesystem on its own.
+///
+/// A preview runs a script cleaner to find out what it would remove, and the
+/// preview flag is only honoured by the `cleaner::remove_*` functions. A script
+/// that calls the `fs` module directly would really delete during a preview,
+/// so the engine refuses to preview those and names them instead.
+fn own_file_code() -> &'static Mutex<std::collections::HashSet<String>> {
+    static KEYS: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    KEYS.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+/// Whether a custom cleaner registered by a script can be measured by running it
+/// with the preview flag on.
+///
+/// `id` is the database id, `script:<the script's own id>:<key>`.
+pub fn can_preview(id: &str) -> bool {
+    let Some((_, key)) = id.rsplit_once(':') else {
+        return false;
+    };
+
+    match own_file_code().lock() {
+        Ok(keys) => !keys.contains(key),
+        Err(_) => false,
+    }
+}
+
+/// Whether the source mentions a module that deletes without the preview flag.
+fn touches_files_directly(source: &str) -> bool {
+    let compact: String = source.chars().filter(|c| !c.is_whitespace()).collect();
+
+    compact.contains("fs::") || compact.contains("process::")
+}
 
 fn programs() -> &'static RwLock<HashMap<String, Arc<ScriptProgram>>> {
     static PROGRAMS: OnceLock<RwLock<HashMap<String, Arc<ScriptProgram>>>> = OnceLock::new();
@@ -529,6 +634,67 @@ pub fn notify_started() {
             database::diag::warn(format!("started hook: {error}"));
         }
     }
+}
+
+/// Runs the `on_scan` hooks of every loaded script.
+///
+/// Called by the frontends before a preview, and synchronously: a scan handler
+/// is the script's chance to say what it is about to measure, and it holds no
+/// locks a longer run would make awkward.
+pub fn notify_scan() {
+    for hook in hooks_of(HookKind::Scan) {
+        if let Err(error) = hook.scan() {
+            database::diag::warn(format!("scan hook: {error}"));
+        }
+    }
+}
+
+/// Runs the `on_program_done` hooks for one cleaned program.
+///
+/// Called after a program's files were removed. A handler that fails is named
+/// in the diagnostics and the run continues: a broken webhook must not stop a
+/// cleanup half-way.
+pub fn notify_program_done(cleared: &Cleared) {
+    let hooks = hooks_of(HookKind::ProgramDone);
+
+    if hooks.is_empty() {
+        return;
+    }
+
+    let report = api::program_report(cleared);
+
+    for hook in hooks {
+        if let Err(error) = hook.program_done(&report) {
+            database::diag::warn(format!("program done hook: {error}"));
+        }
+    }
+}
+
+/// Runs the `on_cancelled` hooks of every loaded script.
+///
+/// Called once after the user stopped a run, on a background thread for the same
+/// reason as [`notify_finished`]: a handler is free to take its time and must not
+/// hold the window that asked for the cancel.
+pub fn notify_cancelled() {
+    let hooks = hooks_of(HookKind::Cancelled);
+
+    if hooks.is_empty() {
+        return;
+    }
+
+    let handle = std::thread::spawn(move || {
+        for hook in hooks {
+            if let Err(error) = hook.cancelled() {
+                database::diag::warn(format!("cancelled hook: {error}"));
+            }
+        }
+    });
+
+    let mut running = match HOOK_THREADS.lock() {
+        Ok(running) => running,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    running.push(handle);
 }
 
 /// When the current run started: the wall clock and when it began.
@@ -726,15 +892,29 @@ fn build(directory: PathBuf) -> Scripts {
 
     collect::begin();
 
+    if let Ok(mut keys) = own_file_code().lock() {
+        keys.clear();
+    }
+
     for path in files {
         collect::set_script(&path);
+        collect::clear_about();
         let mark = collect::mark();
         let errors_before = scripts.errors.len();
+        // Read once: whether this script can be previewed safely does not
+        // depend on which of its cleaners is being measured.
+        let direct = fs::read_to_string(&path)
+            .map(|source| touches_files_directly(&source))
+            .unwrap_or(true);
 
         match compile_and_run(&context, &runtime, &path) {
             Ok(unit) => {
                 for definition in collect::custom_since(mark) {
                     let key = format!("script-{}", NEXT_KEY.fetch_add(1, Ordering::Relaxed));
+
+                    if direct && let Ok(mut keys) = own_file_code().lock() {
+                        keys.insert(key.clone());
+                    }
 
                     add_program(
                         key.clone(),
@@ -780,6 +960,7 @@ fn build(directory: PathBuf) -> Scripts {
             .map(|error| error.message.clone());
 
         scripts.reports.push(ScriptSummary {
+            about: collect::take_about(),
             path: path.clone(),
             files: after.files.saturating_sub(mark.files),
             registry: after.registry.saturating_sub(mark.registry),
@@ -900,6 +1081,7 @@ fn render_diagnostics(diagnostics: &Diagnostics, sources: &Sources) -> String {
 pub(crate) fn script_entry(
     data: &CustomCleaner,
     sender: Option<Sender<String>>,
+    _dry_run: bool,
 ) -> Pin<Box<dyn Future<Output = CleanerResult> + Send>> {
     let data = data.clone();
 
@@ -1000,6 +1182,39 @@ fn record(result: &mut CleanerResult, target: &Path, stats: Stats) {
         });
     } else {
         result.paths_omitted += 1;
+    }
+}
+
+/// Folds refused removals into the result, apart from what was removed.
+///
+/// A locked file is counted with the locked ones and a permission problem with
+/// the denied ones, because the remedy differs: closing a program versus
+/// elevating. The reason itself stays in the script's log; the result carries
+/// paths the UI can list.
+fn record_failures(result: &mut CleanerResult, failures: Vec<remove::Failure>) {
+    for failure in failures {
+        let entry = ClearedPath {
+            path: SharedPath::new(&failure.path),
+            removed_bytes: failure.size,
+            removed_files: 1,
+            removed_directories: 0,
+        };
+
+        if failure.holds_the_file {
+            result.locked_files += 1;
+            result.locked_bytes += failure.size;
+
+            if result.locked.len() < MAX_LISTED_PATHS {
+                result.locked.push(entry);
+            }
+        } else {
+            result.denied_files += 1;
+            result.denied_bytes += failure.size;
+
+            if result.denied.len() < MAX_LISTED_PATHS {
+                result.denied.push(entry);
+            }
+        }
     }
 }
 

@@ -731,6 +731,7 @@ pub type CustomCleanFn =
     fn(
         &CustomCleaner,
         Option<tokio::sync::mpsc::Sender<String>>,
+        bool,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = CleanerResult> + Send>>;
 
 #[derive(Clone)]

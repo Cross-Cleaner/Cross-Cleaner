@@ -31,6 +31,23 @@ const PROGRESS_PREFIX: &str = "PROGRESS:";
 /// Prefix of the "currently cleaning" messages.
 const CLEANING_PREFIX: &str = "Cleaning: ";
 
+/// Prefix of the ids the script API gives the cleaners a script registers.
+const SCRIPT_CLEANER_PREFIX: &str = "script:";
+
+/// Whether a scan can measure this custom cleaner by running it with the
+/// preview flag on.
+///
+/// Built-in custom cleaners support dry-run directly. Script cleaners can be
+/// measured when the script removes through the cleaner API: a script that
+/// calls `fs` or `process` directly could delete during a preview, so it is
+/// named instead of run.
+fn previews(data: &database::structures::CustomCleaner) -> bool {
+    if data.id.starts_with(SCRIPT_CLEANER_PREFIX) {
+        script_api::can_preview(&data.id)
+    } else {
+        true
+    }
+}
 /// How many deleted paths one program keeps for the results page.
 ///
 /// A `…\Cache_Data\*` glob can match tens of thousands of files, and the detail
@@ -191,6 +208,10 @@ pub async fn work_with(
     // prepares for nothing.
     if mode.removes() {
         crate::scripts::notify_started();
+    } else {
+        // A scan has its own hook: scripts that want to mark a preview as such
+        // hear about it here, and nothing is prepared for a run without files.
+        crate::scripts::notify_scan();
     }
 
     // ASYNC without threads: pure FuturesUnordered
@@ -268,10 +289,11 @@ pub async fn work_with(
         {
             if data.sequential {
                 sequential_cleaners.push(data.clone());
-            } else if mode == Mode::Scan {
-                // INFO: a custom cleaner is arbitrary code — image
-                // optimization, an external tool call. There is nothing to walk
-                // ahead of time, so a scan names it instead of guessing a size.
+            } else if mode == Mode::Scan && !previews(&data) {
+                // INFO: a script cleaner that touches `fs` or `process`
+                // directly cannot be measured without running it, and running
+                // it could delete files. Previewable custom cleaners run
+                // instead: a preview deletes nothing.
                 unmeasured.push(Unmeasured {
                     id: data.id.clone(),
                     reason: "custom cleaners can only be measured by running them",
@@ -281,12 +303,24 @@ pub async fn work_with(
                 let sender = progress_sender.clone();
                 let name_msg = data.id.clone();
                 let sem = sem.clone();
+                let scanning = mode == Mode::Scan;
                 futures.push(Box::pin(async move {
                     let _p = sem.acquire_owned().await.unwrap();
                     let _ = sender.send(format!("{CLEANING_PREFIX}{name_msg}")).await;
                     let progress_for_cleaner = sender.clone();
-                    database::custom_cleaners::run_custom_cleaner(&data, Some(progress_for_cleaner))
+                    if scanning {
+                        database::custom_cleaners::measure_custom_cleaner(
+                            &data,
+                            Some(progress_for_cleaner),
+                        )
                         .await
+                    } else {
+                        database::custom_cleaners::run_custom_cleaner(
+                            &data,
+                            Some(progress_for_cleaner),
+                        )
+                        .await
+                    }
                 }));
             }
         }
@@ -360,9 +394,10 @@ pub async fn work_with(
 
     // Run sequential cleaners one at a time (image optimizers, etc.)
     for data in sequential_cleaners {
-        // INFO: the same reason as the concurrent custom cleaners above: they
-        // run code, so a scan cannot measure them without running them.
-        if mode == Mode::Scan {
+        if mode == Mode::Scan && !previews(&data) {
+            // INFO: the same reason as the concurrent custom cleaners above:
+            // unpreviewable script cleaners could delete files if run during a
+            // scan. Previewable custom cleaners run instead.
             unmeasured.push(Unmeasured {
                 id: data.id.clone(),
                 reason: "custom cleaners can only be measured by running them",
@@ -373,11 +408,23 @@ pub async fn work_with(
         let _ = progress_sender
             .send(format!("{CLEANING_PREFIX}{}", data.id))
             .await;
-        let result =
+        let mut result = if mode == Mode::Scan {
+            database::custom_cleaners::measure_custom_cleaner(&data, Some(progress_sender.clone()))
+                .await
+        } else {
             database::custom_cleaners::run_custom_cleaner(&data, Some(progress_sender.clone()))
-                .await;
+                .await
+        };
 
         let (bytes, files, folders) = (result.bytes, result.files, result.folders);
+        // INFO: a preview runs script cleaners too, and those can report locked
+        // and denied paths, so the totals have to be collected here as well.
+        locked_files += result.locked_files;
+        locked_bytes += result.locked_bytes;
+        locked.extend(std::mem::take(&mut result.locked));
+        denied_files += result.denied_files;
+        denied_bytes += result.denied_bytes;
+        denied.extend(std::mem::take(&mut result.denied));
         if fold(&mut cleared_programs, result) {
             bytes_cleared += bytes;
             removed_files += files;
@@ -425,6 +472,13 @@ pub async fn work_with(
             denied_files,
             denied_bytes,
         };
+
+        // One report per program, before the whole-run hooks: a program hook
+        // that posts a line per program is easier to read than one big report,
+        // and it still runs inside the same run.
+        for cleared in &cleared_programs {
+            crate::scripts::notify_program_done(cleared);
+        }
 
         match problem {
             Some(problem) => crate::scripts::notify_failed(totals, &cleared_programs, &problem),
@@ -694,20 +748,31 @@ mod tests {
 
     #[tokio::test]
     async fn a_scan_names_the_cleaners_it_cannot_measure() {
-        use database::structures::CustomCleaner;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("direct.rn"),
+            r#"
+            pub fn main() {
+                cleaner::custom_cleaner("Pictures")
+                    .category("Images")
+                    .sub_category("Pictures")
+                    .path("pictures")
+                    .handler("clean")
+                    .register();
+            }
+
+            pub async fn clean(path) {
+                let _ = fs::read_to_string(path).await;
+            }
+            "#,
+        )
+        .unwrap();
+        let scripts = script_api::load_from(dir.path());
+        assert!(scripts.errors.is_empty(), "{:?}", scripts.errors);
 
         let database = CleanerDatabase::from_vec(Vec::new());
-        let custom = vec![CustomCleaner {
-            id: "Optimize pictures".to_string(),
-            program: Arc::from("Pictures"),
-            category: Arc::from("Images"),
-            sub_category: Arc::from("Pictures"),
-            path: "pictures".into(),
-            args: Vec::new(),
-            os: Vec::new(),
-            function: |_, _| Box::pin(async { panic!("a scan must not run a cleaner") }),
-            sequential: false,
-        }];
+        let custom = scripts.custom;
+        let expected_id = custom[0].id.clone();
 
         let (tx, _rx) = mpsc::channel(64);
         #[cfg(windows)]
@@ -725,8 +790,68 @@ mod tests {
         .await;
 
         assert_eq!(report.unmeasured.len(), 1);
-        assert_eq!(report.unmeasured[0].id, "Optimize pictures");
+        assert_eq!(report.unmeasured[0].id, expected_id);
         assert!(!report.unmeasured[0].reason.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_scan_measures_built_in_custom_cleaners_in_dry_run_mode() {
+        use database::structures::CustomCleaner;
+
+        let database = CleanerDatabase::from_vec(Vec::new());
+        let custom = vec![CustomCleaner {
+            id: "Optimize pictures".to_string(),
+            program: Arc::from("Pictures"),
+            category: Arc::from("Images"),
+            sub_category: Arc::from("Pictures"),
+            path: "pictures".into(),
+            args: Vec::new(),
+            os: Vec::new(),
+            function: |data, _, dry_run| {
+                assert!(dry_run, "scan must pass dry_run = true to custom cleaner");
+                let data = data.clone();
+                Box::pin(async move {
+                    CleanerResult {
+                        files: 1,
+                        folders: 0,
+                        bytes: 1024,
+                        working: true,
+                        path: data.path,
+                        paths: Vec::new(),
+                        paths_omitted: 0,
+                        locked_files: 0,
+                        locked_bytes: 0,
+                        locked: Vec::new(),
+                        denied_files: 0,
+                        denied_bytes: 0,
+                        denied: Vec::new(),
+                        program: data.program,
+                        category: data.category,
+                        sub_category: data.sub_category,
+                    }
+                })
+            },
+            sequential: true,
+        }];
+
+        let (tx, _rx) = mpsc::channel(64);
+        #[cfg(windows)]
+        let registry = RegistryDatabase::from_vec(Vec::new());
+        let report = scan(
+            HashMap::from([(Arc::from("Images"), HashSet::from([Arc::from("Pictures")]))]),
+            tx,
+            &database,
+            &custom,
+            #[cfg(windows)]
+            &registry,
+            HashSet::new(),
+            HashSet::new(),
+        )
+        .await;
+
+        assert!(report.unmeasured.is_empty());
+        assert_eq!(report.free.0, 1024);
+        assert_eq!(report.free.1, 1);
     }
 
     #[test]

@@ -98,6 +98,9 @@ pub async fn run(
                 if let Some(handle) = state.task_handle.take() {
                     handle.abort();
                 }
+                // The job was aborted, so its own end never ran: the cancelled
+                // hook is told here instead of from the cleaning loop.
+                appcore::scripts::notify_cancelled();
                 break;
             }
             _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}

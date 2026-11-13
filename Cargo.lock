@@ -4442,6 +4442,7 @@ dependencies = [
  "glob",
  "rune",
  "rune-modules",
+ "serde_json",
  "tempfile",
  "tokio",
  "ureq",

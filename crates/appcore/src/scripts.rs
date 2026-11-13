@@ -93,3 +93,21 @@ pub fn register_custom_cleaners() {
 pub fn cancel() {
     script_api::session::cancel();
 }
+
+/// Tells the scripts that the run they were taking part in was stopped.
+///
+/// A frontend that aborted the job calls this after the abort: the run itself
+/// never reached its end, so `on_cancelled` is the only hook that can still run.
+pub fn notify_cancelled() {
+    script_api::notify_cancelled();
+}
+
+/// Tells the scripts that a scan is starting.
+pub fn notify_scan() {
+    script_api::notify_scan();
+}
+
+/// Tells the scripts that one program was cleaned.
+pub fn notify_program_done(cleared: &database::structures::Cleared) {
+    script_api::notify_program_done(cleared);
+}

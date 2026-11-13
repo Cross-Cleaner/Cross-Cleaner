@@ -50,14 +50,16 @@ impl GlobCleanStats {
 ///     sequential: false,                  // true = runs one at a time
 ///     args: ["7"],                        // [] = no args
 ///     glob: "C:/ProgramData/MyApp/*.tmp",
-///     |path, args| {
+///     |path, args, dry_run| {
 ///         let bytes = std::fs::metadata(path)?.len();
-///         std::fs::remove_file(path)?;
+///         if !dry_run {
+///             std::fs::remove_file(path)?;
+///         }
 ///         Ok(cleaner::custom_cleaners::GlobCleanStats::file(bytes))
 ///     }
 /// };
 ///
-/// // Without args: `|path|`
+/// // Without args: `|path, dry_run|` or `|path|`
 /// // Without os (all OS): omit `os: [...]` line
 /// ```
 #[macro_export]
@@ -70,16 +72,18 @@ macro_rules! custom_glob_cleaner {
         os: [$($os:expr),* $(,)?],
         sequential: $seq:expr,
         glob: $pattern:expr,
-        |$path:ident, $args:ident| $body:block
+        |$path:ident, $args:ident, $dry_run:ident| $body:block
     ) => {{
         fn __custom_glob_entry(
             $path: &std::path::Path,
             $args: &[String],
+            $dry_run: bool,
         ) -> Result<$crate::custom_cleaners::GlobCleanStats, std::io::Error> $body
 
         fn __custom_glob_wrapper(
             data: &$crate::database::structures::CustomCleaner,
             sender: Option<tokio::sync::mpsc::Sender<String>>,
+            dry_run: bool,
         ) -> std::pin::Pin<Box<dyn std::future::Future<Output = $crate::database::structures::CleanerResult> + Send>> {
             let data = data.clone();
             Box::pin(async move {
@@ -98,10 +102,9 @@ macro_rules! custom_glob_cleaner {
                     program: data.program.clone(),
                     category: data.category.clone(),
                     sub_category: data.sub_category.clone(),
-                    // A custom cleaner runs arbitrary code, so a scan cannot walk
-                    // it ahead of time: these stay zero and the CLI reports
-                    // custom cleaners as "measured by running them", never as
-                    // a number it cannot back up.
+                    // A custom cleaner runs its own body per matched entry rather
+                    // than walking deletability flags ahead of time, so locked/denied
+                    // stay zero.
                     locked_files: 0,
                     locked_bytes: 0,
                     locked: Vec::new(),
@@ -146,7 +149,7 @@ macro_rules! custom_glob_cleaner {
                         let sender_ref = &sender;
                         let removed_ref = &removed;
                         chunk.par_iter().for_each(|entry_path| {
-                            if let Ok(stats) = __custom_glob_entry(entry_path, &data.args) {
+                            if let Ok(stats) = __custom_glob_entry(entry_path, &data.args, dry_run) {
                                 if stats.files > 0 || stats.folders > 0 || stats.bytes > 0 {
                                     total_files_ref.fetch_add(stats.files, Ordering::Relaxed);
                                     total_folders_ref.fetch_add(stats.folders, Ordering::Relaxed);
@@ -186,7 +189,7 @@ macro_rules! custom_glob_cleaner {
                     total += chunk.len() as u64;
                     let removed_ref = &removed;
                     chunk.par_iter().for_each(|entry_path| {
-                        if let Ok(stats) = __custom_glob_entry(entry_path, &data.args) {
+                        if let Ok(stats) = __custom_glob_entry(entry_path, &data.args, dry_run) {
                             if stats.files > 0 || stats.folders > 0 || stats.bytes > 0 {
                                 total_files.fetch_add(stats.files, Ordering::Relaxed);
                                 total_folders.fetch_add(stats.folders, Ordering::Relaxed);
@@ -251,6 +254,28 @@ macro_rules! custom_glob_cleaner {
         os: [$($os:expr),* $(,)?],
         sequential: $seq:expr,
         glob: $pattern:expr,
+        |$path:ident, $args:ident| $body:block
+    ) => {
+        $crate::custom_glob_cleaner! {
+            id: $id,
+            program: $program,
+            category: $category,
+            sub_category: $sub_category,
+            os: [$($os),*],
+            sequential: $seq,
+            glob: $pattern,
+            |$path, $args, __custom_glob_ignored_dry_run| $body
+        }
+    };
+
+    (
+        id: $id:expr,
+        program: $program:expr,
+        category: $category:expr,
+        sub_category: $sub_category:expr,
+        os: [$($os:expr),* $(,)?],
+        sequential: $seq:expr,
+        glob: $pattern:expr,
         |$path:ident| $body:block
     ) => {
         $crate::custom_glob_cleaner! {
@@ -261,7 +286,49 @@ macro_rules! custom_glob_cleaner {
             os: [$($os),*],
             sequential: $seq,
             glob: $pattern,
-            |$path, __custom_glob_ignored_args| $body
+            |$path, __custom_glob_ignored_args, __custom_glob_ignored_dry_run| $body
+        }
+    };
+
+    (
+        id: $id:expr,
+        program: $program:expr,
+        category: $category:expr,
+        sub_category: $sub_category:expr,
+        os: [$($os:expr),* $(,)?],
+        glob: $pattern:expr,
+        |$path:ident, $args:ident, $dry_run:ident| $body:block
+    ) => {
+        $crate::custom_glob_cleaner! {
+            id: $id,
+            program: $program,
+            category: $category,
+            sub_category: $sub_category,
+            os: [$($os),*],
+            sequential: false,
+            glob: $pattern,
+            |$path, $args, $dry_run| $body
+        }
+    };
+
+    (
+        id: $id:expr,
+        program: $program:expr,
+        category: $category:expr,
+        sub_category: $sub_category:expr,
+        os: [$($os:expr),* $(,)?],
+        glob: $pattern:expr,
+        |$path:ident, $dry_run:ident| $body:block
+    ) => {
+        $crate::custom_glob_cleaner! {
+            id: $id,
+            program: $program,
+            category: $category,
+            sub_category: $sub_category,
+            os: [$($os),*],
+            sequential: false,
+            glob: $pattern,
+            |$path, __custom_glob_ignored_args, $dry_run| $body
         }
     };
 
@@ -282,7 +349,7 @@ macro_rules! custom_glob_cleaner {
             os: [$($os),*],
             sequential: false,
             glob: $pattern,
-            |$path, __custom_glob_ignored_args| $body
+            |$path, __custom_glob_ignored_args, __custom_glob_ignored_dry_run| $body
         }
     };
 
@@ -302,7 +369,7 @@ macro_rules! custom_glob_cleaner {
             os: [],
             sequential: false,
             glob: $pattern,
-            |$path, __custom_glob_ignored_args| $body
+            |$path, __custom_glob_ignored_args, __custom_glob_ignored_dry_run| $body
         }
     };
 }
@@ -325,8 +392,8 @@ pub fn register_all() {
         sub_category: "Recent Documents",
         os: ["windows"],
         glob: "{drive}/Users/*/AppData/Local/Microsoft/VisualStudio/*/ApplicationPrivateSettings.xml",
-        |path| {
-            remove_code_containers_offline(path)
+        |path, dry_run| {
+            remove_code_containers_offline(path, dry_run)
         }
     };
 
@@ -339,8 +406,8 @@ pub fn register_all() {
         sub_category: "Recent Documents",
         os: ["windows"],
         glob: "{drive}/Users/*/AppData/Roaming/dnSpy/dnSpy.xml",
-        |path| {
-            remove_dnspy_file_lists(path)
+        |path, dry_run| {
+            remove_dnspy_file_lists(path, dry_run)
         }
     };
 
@@ -354,8 +421,8 @@ pub fn register_all() {
         os: ["windows"],
         sequential: true,
         glob: "{drive}\\Users\\*\\Pictures\\**\\*",
-        |path| {
-            crate::image_optimizer::optimize_single(path)
+        |path, _args, dry_run| {
+            crate::image_optimizer::optimize_single_with(path, dry_run)
         }
     };
 
@@ -369,8 +436,8 @@ pub fn register_all() {
         os: ["windows"],
         sequential: true,
         glob: "{drive}\\Users\\*\\Documents\\ShareX\\Screenshots\\*\\*",
-        |path| {
-            crate::image_optimizer::optimize_single(path)
+        |path, _args, dry_run| {
+            crate::image_optimizer::optimize_single_with(path, dry_run)
         }
     };
 
@@ -383,8 +450,8 @@ pub fn register_all() {
         os: ["android"],
         sequential: true,
         glob: "/storage/emulated/0/Pictures/Screenshots/*",
-        |path| {
-            crate::image_optimizer::optimize_single(path)
+        |path, _args, dry_run| {
+            crate::image_optimizer::optimize_single_with(path, dry_run)
         }
     };
 
@@ -397,8 +464,8 @@ pub fn register_all() {
         os: ["android"],
         sequential: true,
         glob: "/storage/emulated/0/Pictures/**/*",
-        |path| {
-            crate::image_optimizer::optimize_single(path)
+        |path, _args, dry_run| {
+            crate::image_optimizer::optimize_single_with(path, dry_run)
         }
     };
 
@@ -411,8 +478,8 @@ pub fn register_all() {
         os: ["linux"],
         sequential: true,
         glob: "/home/*/Pictures/**/*",
-        |path| {
-            crate::image_optimizer::optimize_single(path)
+        |path, _args, dry_run| {
+            crate::image_optimizer::optimize_single_with(path, dry_run)
         }
     };
 
@@ -425,8 +492,8 @@ pub fn register_all() {
         os: ["linux"],
         sequential: true,
         glob: "/home/*/.local/state/omarchy/clipboard-images/*",
-        |path| {
-            crate::image_optimizer::optimize_single(path)
+        |path, _args, dry_run| {
+            crate::image_optimizer::optimize_single_with(path, dry_run)
         }
     };
 }
@@ -435,6 +502,7 @@ pub fn register_all() {
 #[cfg(windows)]
 fn remove_code_containers_offline(
     path: &std::path::Path,
+    dry_run: bool,
 ) -> std::io::Result<crate::custom_cleaners::GlobCleanStats> {
     const SETTING_START: &str = "<collection name=\"CodeContainers.Offline\">";
     const SETTING_END: &str = "</collection>";
@@ -449,17 +517,18 @@ fn remove_code_containers_offline(
     };
     let end = start + end_rel + SETTING_END.len();
 
-    let mut new_content = String::with_capacity(content.len() - (end - start));
-    new_content.push_str(&content[..start]);
-    new_content.push_str(&content[end..]);
+    if !dry_run {
+        let mut new_content = String::with_capacity(content.len() - (end - start));
+        new_content.push_str(&content[..start]);
+        new_content.push_str(&content[end..]);
 
-    std::fs::write(path, new_content)?;
+        std::fs::write(path, new_content)?;
+    }
 
     Ok(crate::custom_cleaners::GlobCleanStats::file(
         (end - start) as u64,
     ))
 }
-
 /// Removes the whole `<section _="FileLists" name="(Default)">...</section>`
 /// element (with nested FileList/File entries - the recent files list)
 /// from dnSpy.xml. Handles nested `<section>` blocks and self-closing
@@ -467,6 +536,7 @@ fn remove_code_containers_offline(
 #[cfg(windows)]
 fn remove_dnspy_file_lists(
     path: &std::path::Path,
+    dry_run: bool,
 ) -> std::io::Result<crate::custom_cleaners::GlobCleanStats> {
     const SECTION_START: &str = "<section _=\"FileLists\"";
     const OPEN: &str = "<section";
@@ -518,13 +588,60 @@ fn remove_dnspy_file_lists(
         }
     }
 
-    let mut new_content = String::with_capacity(content.len() - (pos - start));
-    new_content.push_str(&content[..start]);
-    new_content.push_str(&content[pos..]);
+    if !dry_run {
+        let mut new_content = String::with_capacity(content.len() - (pos - start));
+        new_content.push_str(&content[..start]);
+        new_content.push_str(&content[pos..]);
 
-    std::fs::write(path, new_content)?;
+        std::fs::write(path, new_content)?;
+    }
 
     Ok(crate::custom_cleaners::GlobCleanStats::file(
         (pos - start) as u64,
     ))
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vscode_dry_run_measures_without_modifying_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ApplicationPrivateSettings.xml");
+        let xml = "<root><collection name=\"CodeContainers.Offline\"><value>abc</value></collection><other/></root>";
+        std::fs::write(&path, xml).unwrap();
+
+        let dry = remove_code_containers_offline(&path, true).unwrap();
+        assert_eq!(dry.files, 1);
+        assert!(dry.bytes > 0);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), xml);
+
+        let real = remove_code_containers_offline(&path, false).unwrap();
+        assert_eq!(dry, real);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "<root><other/></root>"
+        );
+    }
+
+    #[test]
+    fn dnspy_dry_run_measures_without_modifying_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dnSpy.xml");
+        let xml = "<settings><section _=\"FileLists\" name=\"(Default)\"><section name=\"item\"/></section><keep/></settings>";
+        std::fs::write(&path, xml).unwrap();
+
+        let dry = remove_dnspy_file_lists(&path, true).unwrap();
+        assert_eq!(dry.files, 1);
+        assert!(dry.bytes > 0);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), xml);
+
+        let real = remove_dnspy_file_lists(&path, false).unwrap();
+        assert_eq!(dry, real);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "<settings><keep/></settings>"
+        );
+    }
 }

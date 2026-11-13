@@ -20,10 +20,14 @@ there is compiled by the test suite, so it is guaranteed to be valid API.
   - [Paths](#paths)
   - [Removing](#removing)
   - [Counting](#counting)
+  - [Script state](#script-state)
   - [Diagnostics and webhooks](#diagnostics-and-webhooks)
   - [Hook: before the run](#hook-before-the-run-on_started)
   - [Hook: after a run that went wrong](#hook-after-a-run-that-went-wrong-on_error)
   - [The finished hook](#the-finished-hook-on_finished)
+  - [Hook: before a scan](#hook-before-a-scan-on_scan)
+  - [Hook: after one program](#hook-after-one-program-on_program_done)
+  - [Hook: after a stopped run](#hook-after-a-stopped-run-on_cancelled)
 - [`cleaner::registry`](#cleanerregistry-windows)
 - [Types](#-types)
 - [Standard library](#-standard-library)
@@ -259,8 +263,11 @@ through the counting described below — a return value is not used, so a script
 cannot overstate its result.
 
 `custom_cleaner` handlers cannot be measured by `--dry-run` without running
-them; a scan names them as unmeasured instead of promising their bytes.
-
+them, so a scan runs them too, with the removals switched to measuring: the
+numbers a scan shows for a handler are real, counted from the files it would
+delete. A handler that touches files through `fs::` or `process::` itself cannot
+be measured that way — it is named as unmeasured instead of promising bytes it
+did not count.
 #### Fencing a handler with `within`
 
 A handler decides for itself what to delete, which makes a path bug in it the one
@@ -294,8 +301,15 @@ computed path: it costs one check and turns "a script wiped my drive" into
 | `cleaner::exists(path)` | `bool` | This is the check to use before deleting |
 | `cleaner::is_file(path)` | `bool` | False for directories and symlinks |
 | `cleaner::is_dir(path)` | `bool` | |
+| `cleaner::is_symlink(path)` | `bool` | A link itself, not what it points at |
+| `cleaner::is_empty_dir(path)` | `bool` | A directory with nothing inside it |
+| `cleaner::canonical(path)` | `Option<String>` | The absolute path, with `..` and links resolved |
+| `cleaner::stat(path)` | `Option<FileInfo>` | Size, timestamps and kind in one call |
+| `cleaner::extension(path)` | `Option<String>` | `"log"`, without the dot |
+| `cleaner::stem(path)` | `Option<String>` | The file name without its extension |
 | `cleaner::list(path)` | `[String]` | Direct entries as full paths, sorted; a missing directory is `[]` |
 | `cleaner::glob(pattern)` | `[String]` | `**` crosses directories; sorted; `[]` when nothing matches |
+| `cleaner::count(path, pattern)` | `u64` | How many files under `path` match, without listing them |
 | `cleaner::size(path)` | `u64` | Bytes under `path`, directories included |
 | `cleaner::modified(path)` | `Option<u64>` | Seconds since the Unix epoch |
 | `cleaner::now()` | `u64` | Seconds since the Unix epoch |
@@ -305,6 +319,14 @@ computed path: it costs one check and turns "a script wiped my drive" into
 
 `cleaner::read` is the synchronous counterpart of `fs::read_to_string`, which is
 `async` and therefore unusable from a non-`async` handler.
+
+`stat` is the cheap alternative to `size`/`modified` when a handler looks at
+many files: one call, and a `FileInfo` with `size`, `modified`, `created`,
+`is_file`, `is_dir` and `is_symlink`. It reads the link itself, so a symlink to
+a huge directory is one small entry, not a walk.
+
+`count` answers "is this worth cleaning at all" without building a list of two
+hundred thousand paths: `if cleaner::count(path, "*.log") > 100 { ... }`.
 
 ### Deciding what to delete
 
@@ -354,6 +376,15 @@ if busy.is_empty() {
 | `cleaner::parent(path)` | `Option<String>` | The containing directory |
 | `cleaner::filename(path)` | `Option<String>` | The last component |
 | `cleaner::expand(pattern)` | `[String]` | The rule-path placeholders, one entry per drive |
+| `cleaner::local_appdata()` | `String` | `AppData\Local`, `~/.local/share`, `Application Support` |
+| `cleaner::temp()` | `String` | The system temp directory |
+| `cleaner::program_data()` | `Option<String>` | `ProgramData`; `None` where there is no such thing |
+| `cleaner::program_files()` | `Option<String>` | The 64-bit program files directory |
+| `cleaner::drive()` | `String` | The first drive, e.g. `"C:"`; empty when unknown |
+| `cleaner::drives()` | `[String]` | Every drive root on the machine |
+| `cleaner::steam()` | `String` | The Steam installation directory; empty when absent |
+| `cleaner::env(name)` | `Option<String>` | One environment variable |
+| `cleaner::arch()` | `String` | `"x86_64"`, `"aarch64"`, … |
 
 `join` takes its pieces, so a handler that still needs its argument clones it:
 `cleaner::join([path.clone(), "cache"])`.
@@ -380,10 +411,17 @@ handler that is running, so the results page shows what actually went.
 | `cleaner::remove_files(path, "*.log")` | Files under `path` whose name matches the glob |
 | `cleaner::remove_directories(path, "cache-*")` | Matching sub-directories and their contents |
 | `cleaner::remove_all(path)` | Everything inside `path`, keeping `path` |
+| `cleaner::trash(path)` | `bool` — moves the file or directory to the system trash instead of deleting it |
+| `cleaner::optimize_image(path)` | `Option<Stats>` — rewrites an image smaller in place, `None` when nothing was saved |
+| `cleaner::optimize_images(path, "*.png")` | Rewrites matching images under `path` smaller in place |
 
 A file that cannot be deleted (held open, permissions) is not an error: it is
 skipped, not counted, and the run continues. That is deliberate — one locked log
 must not stop the other 2000 from being cleaned.
+
+`cleaner::failures()` says what was skipped and why — a held-open file and a
+path the system refuses both leave `Stats` at zero, and the list is how a
+handler tells them apart (see [Counting](#counting)).
 
 ### Counting
 
@@ -391,6 +429,7 @@ must not stop the other 2000 from being cleaned.
 | --- | --- |
 | `cleaner::stats()` | What the current handler has removed so far |
 | `cleaner::track(files, folders, bytes)` | Add work the handler did itself |
+| `cleaner::human_size(bytes)` | `String` — `"1.4 MB"`, formatted the way the results page does it |
 
 `track` exists for deletions made with std (`fs::remove_file`) rather than with
 `cleaner::remove_*`. Do not use both for the same file, or it counts twice.
@@ -413,6 +452,61 @@ pub fn clean(path) {
 The cost of getting this wrong is visible to the user: the numbers on the
 results page are the numbers these calls recorded.
 
+A removal that did not happen leaves `Stats` at zero, exactly like a path that
+was not there. `cleaner::failures()` is how a handler tells the two apart:
+
+```rune
+pub fn clean(path) {
+    cleaner::remove_all(path);
+
+    for failure in cleaner::failures() {
+        let advice = if failure.locked() {
+            "close the program holding it"
+        } else {
+            "the system refused it"
+        };
+
+        cleaner::warn(`${failure.path} (${cleaner::human_size(failure.size)}): ${failure.reason} — ${advice}`);
+    }
+}
+```
+
+The list is per `clean` call and holds at most 1024 entries, so a handler
+walking a fully locked tree logs something useful and stays bounded.
+
+### Script state
+
+A handler that runs on every scan and every clean has no memory otherwise: a
+"clean this once a week" rule cannot know when it last ran. The state store is
+the memory:
+
+| Function | Effect |
+| --- | --- |
+| `cleaner::state_get(key)` | `Option<String>` — the value saved last time |
+| `cleaner::state_set(key, value)` | `bool` — saves it, atomically |
+| `cleaner::state_delete(key)` | `bool` — `true` when the key existed |
+| `cleaner::state_keys()` | `[String]` — every key this script saved |
+
+```rune
+pub fn clean(path) {
+    let now = cleaner::now();
+    let last = cleaner::state_get("last-run").unwrap_or("0");
+
+    if now - last.parse::<u64>().unwrap_or(0) < 7 * 24 * 60 * 60 {
+        cleaner::log("cleaned less than a week ago, skipping");
+        return;
+    }
+
+    cleaner::remove_all(path);
+    cleaner::state_set("last-run", `${now}`);
+}
+```
+
+The store is per script file, kept in `.state` beside the scripts, and survives
+restarts and updates. It is plain strings: numbers, dates and lists are the
+script's business to format and parse. A preview may also save — it is script
+bookkeeping, not user data.
+
 ### Diagnostics and webhooks
 
 | Function | Effect |
@@ -421,8 +515,12 @@ results page are the numbers these calls recorded.
 | `cleaner::warn(message)` | A warning in the application log |
 | `cleaner::http_get(url)` | `Option<String>` — the body, `None` on any failure |
 | `cleaner::http_post(url, body)` | `bool` — `true` when the server accepted it |
+| `cleaner::http_request(method, url, body, headers, timeout)` | `Option<HttpResponse>` — any method, custom headers, its own timeout |
 | `cleaner::notify(title, body)` | `bool` — the app's own desktop notification |
 | `cleaner::progress(text)` | One line in the app's log; the frontends show it as the current step |
+| `cleaner::progress_add(files)` | Adds files to that line — for a handler that walks files itself |
+| `cleaner::progress_files(done, total)` | Shows `done/total files` — the same, when the total is known |
+| `cleaner::about(name, version, author, description)` | Registers what `cli scripts` shows for this script |
 | `cleaner::dry_run()` | `bool` — the run is a scan, not a real one |
 | `cleaner::cancelled()` | `bool` — the user asked the run to stop |
 | `cleaner::is_protected(path)` | `bool` — inside Windows, Program Files, the home root or this app |
@@ -458,7 +556,12 @@ pub fn clean(path) {
 `dry_run()` is the other half of the same idea: a handler that runs during
 `--dry-run` should look and report, not delete. Handlers are named as unmeasured
 in a scan, so this only matters for a handler that still wants to say something
-useful about what it would find.
+`dry_run()` is the other half of the same idea: a handler that runs during
+`--dry-run` should look and report, not delete. A scan runs script cleaners too,
+with every `remove_*` call measuring instead of deleting, so a handler that uses
+them is counted like any other cleaner. A handler that deletes through `fs::`
+or `process::` cannot be measured that way and is named as unmeasured in the
+scan instead.
 
 ### Hook: before the run (`on_started`)
 
@@ -522,6 +625,64 @@ dry run — so a slow webhook does not hold up the results page. `cli clean` wai
 up to ten seconds for it before exiting; the window apps let it run as long as
 they stay open. A script that declares a hook still needs a `main`, even an
 empty one.
+
+### Hook: before a scan (`on_scan`)
+
+```rune
+pub fn main() {
+    cleaner::on_scan("mark_estimates");
+}
+
+pub fn mark_estimates() {
+    // The app is about to list what it would free. Nothing has been removed
+    // yet, and `dry_run()` is true for the rest of this run.
+    cleaner::log("scan starting");
+}
+```
+
+Synchronous, once per scan, before any cleaner is measured. A scan runs a
+script cleaner in measuring mode, so this is the moment a handler can prepare
+for it — read the state store, check whether a program is open, or tell the
+user what it is about to look at. Never called for a real run: `on_started` is
+that hook.
+
+### Hook: after one program (`on_program_done`)
+
+```rune
+pub fn main() {
+    cleaner::on_program_done("note_program");
+}
+
+pub fn note_program(report) {
+    // One call per program that was cleaned, with the same shape a
+    // `report.entries()` row has.
+    cleaner::log(`${report.program}: ${report.files} files, ${report.size()}`);
+}
+```
+
+Synchronous, once per cleaned program, before `on_finished` / `on_error`. A
+program cleaned under several categories is still one call: the report lists
+all of them. Use it for per-program bookkeeping — a state store entry, a log
+line, a counter — instead of walking `report.entries()` yourself.
+
+### Hook: after a stopped run (`on_cancelled`)
+
+```rune
+pub fn main() {
+    cleaner::on_cancelled("clean_up");
+}
+
+pub fn clean_up() {
+    // The user asked to stop. Whatever the handler set up in `on_started`
+    // is undone here.
+    let marker = cleaner::join([cleaner::appdata(), "..", "Local", "My App", "cleaning.lock"]);
+    cleaner::remove_file(marker);
+}
+```
+
+Called when the user stops a run that was already deleting. A run that ends
+normally calls `on_finished` (or `on_error`), never this one, and a stopped run
+never calls `on_finished`: exactly one of the two runs per attempt.
 
 ## `cleaner::registry` (Windows)
 
@@ -601,6 +762,42 @@ Returned by every removal call and by `cleaner::stats()`.
 | `folders` | `u64` | Directories removed, including those removed with their contents |
 | `bytes` | `u64` | Bytes freed |
 
+### `FileInfo`
+
+Returned by `cleaner::stat`. Read from the link itself: a symlink describes the
+link, not the tree it points at.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `size` | `u64` | Bytes, `0` for a directory |
+| `modified` | `Option<u64>` | Seconds since the Unix epoch |
+| `created` | `Option<u64>` | Seconds since the Unix epoch; `None` where the platform does not record it |
+| `is_file` | `bool` | |
+| `is_dir` | `bool` | |
+| `is_symlink` | `bool` | The entry is a link, not what it points at |
+
+### `Failure`
+
+One row of `cleaner::failures`: a removal that did not happen.
+
+| Member | Type | Meaning |
+| --- | --- | --- |
+| `path` | `String` | What could not be removed |
+| `reason` | `String` | Why, in words ready for a log line |
+| `size` | `u64` | Bytes that stayed behind |
+| `.locked()` | `bool` | Another program holds it open, rather than the system refusing |
+
+### `HttpResponse`
+
+Returned by `cleaner::http_request`.
+
+| Member | Type | Meaning |
+| --- | --- | --- |
+| `status` | `u16` | The HTTP status code |
+| `.body()` | `String` | The response body |
+| `.ok()` | `bool` | The status is 200–299 |
+| `.header(name)` | `Option<String>` | One header, case-insensitive |
+| `.headers()` | `[String]` | Every header as `"Name: value"` |
 ### `Report`
 
 Handed to every `on_finished` handler.

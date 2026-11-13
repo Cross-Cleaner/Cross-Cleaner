@@ -139,7 +139,7 @@ fn a_custom_cleaner_reports_what_it_removed() {
         .enable_all()
         .build()
         .unwrap()
-        .block_on(async { (cleaner.function)(&cleaner, None).await });
+        .block_on(async { (cleaner.function)(&cleaner, None, false).await });
 
     // Two files, 15 bytes; the directories stay because the script only
     // removed files.
@@ -202,7 +202,7 @@ fn a_glob_cleaner_counts_every_path_it_was_handed() {
         .enable_all()
         .build()
         .unwrap()
-        .block_on(async { (cleaner.function)(&cleaner, None).await });
+        .block_on(async { (cleaner.function)(&cleaner, None, false).await });
 
     assert!(!cache.join("a").join("one.tmp").exists());
     assert!(!cache.join("a").join("two.tmp").exists());
@@ -262,7 +262,7 @@ fn one_failing_path_does_not_stop_the_others() {
         .enable_all()
         .build()
         .unwrap()
-        .block_on(async { (cleaner.function)(&cleaner, None).await });
+        .block_on(async { (cleaner.function)(&cleaner, None, false).await });
 
     // The panic belongs to `boom.tmp`: the other two are still cleaned and
     // counted, and the file that panicked is left where it was.
@@ -312,7 +312,7 @@ fn a_handler_may_await_and_use_std() {
         .enable_all()
         .build()
         .unwrap()
-        .block_on(async { (cleaner.function)(&cleaner, None).await });
+        .block_on(async { (cleaner.function)(&cleaner, None, false).await });
 
     assert_eq!(result.files, 1);
     assert_eq!(result.bytes, 5);
@@ -528,7 +528,7 @@ fn the_decisions_and_path_helpers_answer_about_real_files() {
         .enable_all()
         .build()
         .unwrap()
-        .block_on(async { (cleaner.function)(&cleaner, None).await });
+        .block_on(async { (cleaner.function)(&cleaner, None, false).await });
 
     assert!(!cache.join("drop.tmp").exists(), "older_than + matches");
     assert!(cache.join("keep.txt").exists());
@@ -595,7 +595,7 @@ fn the_decisions_and_path_helpers_answer_about_real_files() {
         .enable_all()
         .build()
         .unwrap()
-        .block_on(async { (cleaner.function)(&cleaner, None).await });
+        .block_on(async { (cleaner.function)(&cleaner, None, false).await });
 
     let text = fs::read_to_string(&out).unwrap();
     let fields: Vec<&str> = text.split('|').collect();
@@ -816,7 +816,7 @@ fn a_script_can_read_and_remove_registry_values() {
         .enable_all()
         .build()
         .unwrap()
-        .block_on(async { (cleaner.function)(&cleaner, None).await });
+        .block_on(async { (cleaner.function)(&cleaner, None, false).await });
 
     let text = fs::read_to_string(&out).unwrap();
     let fields: Vec<&str> = text.split('|').collect();
@@ -940,7 +940,7 @@ fn within_keeps_a_handler_inside_its_own_directory() {
         .enable_all()
         .build()
         .unwrap()
-        .block_on(async { (cleaner.function)(&cleaner, None).await });
+        .block_on(async { (cleaner.function)(&cleaner, None, false).await });
 
     assert!(
         outside.join("b.tmp").exists(),
@@ -1105,7 +1105,7 @@ fn a_script_can_read_types_export_and_back_up_a_key() {
         .enable_all()
         .build()
         .unwrap()
-        .block_on(async { (cleaner.function)(&cleaner, None).await });
+        .block_on(async { (cleaner.function)(&cleaner, None, false).await });
 
     let text = fs::read_to_string(&out).unwrap();
     let fields: Vec<&str> = text.split('|').collect();
@@ -1127,4 +1127,318 @@ fn a_script_can_read_types_export_and_back_up_a_key() {
     assert_eq!(fields[5], "true", "{text}");
     assert!(dump.exists(), "the backup file was written");
     assert!(fs::read_to_string(&dump).unwrap().contains("Count"));
+}
+
+#[test]
+fn the_scan_and_program_done_hooks_see_their_moments() {
+    let _guard = lock();
+    let dir = tempfile::tempdir().unwrap();
+    let scanned = dir.path().join("scan.txt");
+    let programmed = dir.path().join("program.txt");
+
+    let scripts = load(
+        dir.path().join("scripts").as_path(),
+        "phases.rn",
+        &format!(
+            r#"
+            pub fn main() {{
+                cleaner::on_scan("scanned");
+                cleaner::on_program_done("programmed");
+            }}
+
+            pub fn scanned() {{
+                cleaner::write({}, "scan");
+            }}
+
+            pub fn programmed(report) {{
+                cleaner::write({}, `${{report.program}}:${{report.files}}:${{report.bytes}}`);
+            }}
+            "#,
+            literal(&scanned),
+            literal(&programmed),
+        ),
+    );
+
+    assert!(scripts.errors.is_empty(), "{:?}", scripts.errors);
+
+    // The scan hook is synchronous: a scan's numbers are already known when it
+    // returns, so nothing has to wait for it.
+    script_api::notify_scan();
+    assert_eq!(fs::read_to_string(&scanned).unwrap(), "scan");
+
+    let cleared = Cleared {
+        program: "Demo".into(),
+        removed_bytes: 12,
+        removed_files: 2,
+        removed_directories: 0,
+        affected_categories: vec!["Cache".into()],
+        category_totals: Vec::new(),
+        paths: Vec::new(),
+        paths_omitted: 0,
+    };
+
+    script_api::notify_program_done(&cleared);
+    assert_eq!(
+        fs::read_to_string(&programmed).unwrap(),
+        "Demo:2:12",
+        "one call per program, with the numbers that program contributed"
+    );
+}
+
+#[test]
+fn a_scan_measures_a_script_cleaner_instead_of_removing() {
+    let _guard = lock();
+    let dir = tempfile::tempdir().unwrap();
+    let cache = dir.path().join("cache");
+
+    fs::create_dir_all(&cache).unwrap();
+    fs::write(cache.join("one.tmp"), "0123456789").unwrap();
+    fs::write(cache.join("two.tmp"), "01234").unwrap();
+
+    let scripts = load(
+        dir.path().join("scripts").as_path(),
+        "measured.rn",
+        &format!(
+            r#"
+            pub fn main() {{
+                cleaner::custom_cleaner("Measured")
+                    .category("Cache")
+                    .path({})
+                    .handler("clean")
+                    .register();
+            }}
+
+            pub fn clean(path) {{
+                cleaner::remove_all(path);
+            }}
+            "#,
+            literal(&cache),
+        ),
+    );
+
+    assert!(scripts.errors.is_empty(), "{:?}", scripts.errors);
+
+    let cleaner = scripts.custom[0].clone();
+    let run = || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async { (cleaner.function)(&cleaner, None, false).await })
+    };
+
+    script_api::session::begin(true);
+    let measured = run();
+
+    script_api::session::begin(false);
+
+    assert!(
+        cache.join("one.tmp").exists() && cache.join("two.tmp").exists(),
+        "a scan must not delete anything"
+    );
+    assert_eq!(
+        measured.files, 2,
+        "but it counts what it would have removed"
+    );
+    assert_eq!(measured.bytes, 15);
+
+    // The same handler, allowed to delete, does exactly what the scan counted.
+    let cleaned = run();
+    assert!(!cache.join("one.tmp").exists());
+    assert!(!cache.join("two.tmp").exists());
+    assert_eq!(cleaned.files, measured.files);
+    assert_eq!(cleaned.bytes, measured.bytes);
+}
+
+#[test]
+fn a_script_reads_paths_state_and_its_own_metadata() {
+    let _guard = lock();
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("store");
+    let cache = dir.path().join("cache");
+    let out = dir.path().join("out.txt");
+
+    fs::create_dir_all(&cache).unwrap();
+    fs::write(cache.join("sample.log"), "01234").unwrap();
+
+    // The state store lives beside the scripts, so point it at the temp
+    // directory: a test must not touch the user's real scripts folder.
+    // SAFETY: every test in this file holds `lock()`, and nothing else in the
+    // process reads this variable concurrently.
+    unsafe { std::env::set_var("CROSS_CLEANER_SCRIPTS_DIR", &store) };
+
+    let scripts = load(
+        dir.path().join("scripts").as_path(),
+        "lookups.rn",
+        &format!(
+            r#"
+            pub fn main() {{
+                cleaner::about("Lookups", "1.2", "Tester", "checks the helpers");
+
+                cleaner::custom_cleaner("Lookups")
+                    .category("Cache")
+                    .path({})
+                    .handler("inspect")
+                    .register();
+            }}
+
+            pub fn inspect(path) {{
+                let file = cleaner::join([path.clone(), "sample.log"]);
+                let size_of = match cleaner::stat(file.clone()) {{
+                    Some(info) => info.size,
+                    None => 0,
+                }};
+
+                let extension = cleaner::extension(file.clone()).unwrap_or("none");
+                let stem = cleaner::stem(file.clone()).unwrap_or("none");
+                let counted = cleaner::count(path.clone(), "*.log");
+                let has_arch = cleaner::arch().len() > 0;
+                let has_env = cleaner::env("PATH").is_some();
+                let link = cleaner::is_symlink(file.clone());
+                let empty = cleaner::is_empty_dir(path.clone());
+                let saved = cleaner::state_set("seen", "yes");
+                let read = cleaner::state_get("seen").unwrap_or("none");
+                let keys = cleaner::state_keys().len();
+                let deleted = cleaner::state_delete("seen");
+                let head = `${{extension}},${{stem}},${{cleaner::human_size(1536)}}`;
+                let rest = `${{counted}},${{has_arch}},${{has_env}},${{link}},${{empty}}`;
+
+                cleaner::write(
+                    {},
+                    `${{head}},${{rest}},${{size_of}},${{saved}},${{read}},${{keys}},${{deleted}}`,
+                );
+            }}
+            "#,
+            literal(&cache),
+            literal(&out),
+        ),
+    );
+
+    assert!(scripts.errors.is_empty(), "{:?}", scripts.errors);
+
+    let about = scripts.reports[0]
+        .about
+        .as_ref()
+        .expect("the script described itself");
+    assert_eq!(about.name, "Lookups");
+    assert_eq!(about.version, "1.2");
+
+    let cleaner = scripts.custom[0].clone();
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async { (cleaner.function)(&cleaner, None, false).await });
+
+    let text = fs::read_to_string(&out).unwrap();
+    let fields: Vec<&str> = text.split(',').collect();
+
+    assert_eq!(fields[0], "log", "the extension has no dot: {text}");
+    assert_eq!(fields[1], "sample", "the stem keeps the name: {text}");
+    assert_eq!(
+        fields[2], "1.5 KB",
+        "sizes read the way the app shows them: {text}"
+    );
+    assert_eq!(fields[3], "1", "count answers without listing: {text}");
+    assert_eq!(fields[4], "true", "the architecture is known: {text}");
+    assert_eq!(fields[5], "true", "the environment is readable: {text}");
+    assert_eq!(fields[6], "false", "a plain file is not a link: {text}");
+    assert_eq!(fields[7], "false", "the directory holds a file: {text}");
+    assert_eq!(fields[8], "5", "stat reads the size: {text}");
+    assert_eq!(fields[9], "true", "state saves what it was given: {text}");
+    assert_eq!(fields[10], "yes", "and gives it back: {text}");
+    assert_eq!(fields[11], "1", "the key is listed: {text}");
+    assert_eq!(fields[12], "true", "and can be deleted: {text}");
+    assert!(
+        store.join(".state").join("lookups.rn.json").exists(),
+        "the state file lives beside the scripts"
+    );
+
+    unsafe { std::env::remove_var("CROSS_CLEANER_SCRIPTS_DIR") };
+}
+
+#[test]
+fn optimize_images_compresses_in_place_and_tracks_savings_in_scan_and_clean() {
+    let _guard = lock();
+    let dir = tempfile::tempdir().unwrap();
+    let pictures = dir.path().join("pictures");
+    fs::create_dir_all(&pictures).unwrap();
+
+    // Write a valid 16x16 BMP with trailing padding bytes so the optimizer shrinks it in place.
+    let img_path = pictures.join("sample.bmp");
+    let width = 16u32;
+    let height = 16u32;
+    let row_bytes = width * 3;
+    let pixel_bytes = row_bytes * height;
+    let file_size = 54 + pixel_bytes;
+    let mut bmp = Vec::with_capacity(file_size as usize + 512);
+    bmp.extend_from_slice(b"BM");
+    bmp.extend_from_slice(&file_size.to_le_bytes());
+    bmp.extend_from_slice(&0u32.to_le_bytes());
+    bmp.extend_from_slice(&54u32.to_le_bytes());
+    bmp.extend_from_slice(&40u32.to_le_bytes());
+    bmp.extend_from_slice(&(width as i32).to_le_bytes());
+    bmp.extend_from_slice(&(height as i32).to_le_bytes());
+    bmp.extend_from_slice(&1u16.to_le_bytes());
+    bmp.extend_from_slice(&24u16.to_le_bytes());
+    bmp.extend_from_slice(&0u32.to_le_bytes());
+    bmp.extend_from_slice(&pixel_bytes.to_le_bytes());
+    bmp.extend_from_slice(&2835i32.to_le_bytes());
+    bmp.extend_from_slice(&2835i32.to_le_bytes());
+    bmp.extend_from_slice(&0u32.to_le_bytes());
+    bmp.extend_from_slice(&0u32.to_le_bytes());
+    bmp.resize(file_size as usize + 512, 0x42);
+    fs::write(&img_path, &bmp).unwrap();
+    let original_len = bmp.len() as u64;
+
+    let scripts = load(
+        dir.path(),
+        "pictures.rn",
+        &format!(
+            r#"
+            pub fn main() {{
+                cleaner::custom_cleaner("Pictures")
+                    .category("Images")
+                    .path({})
+                    .handler("shrink")
+                    .register();
+            }}
+
+            pub fn shrink(path) {{
+                cleaner::optimize_images(path, "*.bmp");
+            }}
+            "#,
+            literal(&pictures),
+        ),
+    );
+    assert!(scripts.errors.is_empty(), "{:?}", scripts.errors);
+
+    let cleaner = scripts.custom[0].clone();
+    assert!(script_api::can_preview(&cleaner.id));
+
+    let run = || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                (cleaner.function)(&cleaner, None, script_api::session::dry_run()).await
+            })
+    };
+
+    // Dry run measures the savings without touching the file.
+    script_api::session::begin(true);
+    let measured = run();
+    script_api::session::begin(false);
+    assert_eq!(fs::metadata(&img_path).unwrap().len(), original_len);
+    assert_eq!(measured.files, 1);
+    assert!(measured.bytes > 0);
+
+    // Real run rewrites the image and reports the exact same savings.
+    let cleaned = run();
+    let new_len = fs::metadata(&img_path).unwrap().len();
+    assert!(new_len < original_len);
+    assert_eq!(cleaned.files, 1);
+    assert_eq!(cleaned.bytes, measured.bytes);
+    assert_eq!(original_len - new_len, cleaned.bytes);
 }

@@ -45,6 +45,12 @@ pub(crate) enum HookKind {
     Finished,
     /// After a run that left something behind — denied or locked.
     Failed,
+    /// Before a scan (a preview), once per scan.
+    Scan,
+    /// After one program was cleaned, with its report.
+    ProgramDone,
+    /// After a run the user stopped.
+    Cancelled,
 }
 
 /// A hook declared by a script.
@@ -63,7 +69,22 @@ pub(crate) struct Collected {
     /// Handlers registered with `cleaner::on_started` and friends.
     pub hooks: Vec<HookDefinition>,
     pub errors: Vec<ScriptError>,
+    /// What the script says about itself, from `cleaner::about`.
+    pub about: Option<About>,
     script: Option<PathBuf>,
+}
+
+/// The description a script gives of itself, shown by `cli scripts`.
+#[derive(Debug, Clone, Default)]
+pub struct About {
+    /// The script's own name, which may differ from its file name.
+    pub name: String,
+    /// The script's version, free-form, such as `"1.2"`.
+    pub version: String,
+    /// Who wrote it.
+    pub author: String,
+    /// One line saying what it does.
+    pub description: String,
 }
 
 /// How far the collector had got before a script started.
@@ -100,6 +121,28 @@ pub(crate) fn begin() {
         Err(poisoned) => poisoned.into_inner(),
     };
     *slot = Some(Collected::default());
+}
+
+/// Records what the running script says about itself.
+pub(crate) fn about(name: &str, version: &str, author: &str, description: &str) {
+    with(|collected| {
+        collected.about = Some(About {
+            name: name.to_owned(),
+            version: version.to_owned(),
+            author: author.to_owned(),
+            description: description.to_owned(),
+        });
+    });
+}
+
+/// Forgets an `about` declared by the script before this one.
+pub(crate) fn clear_about() {
+    with(|collected| collected.about = None);
+}
+
+/// Takes what the last script declared about itself.
+pub(crate) fn take_about() -> Option<About> {
+    with(|collected| collected.about.take()).flatten()
 }
 
 /// Takes everything collected so far. Called once per load, after the last

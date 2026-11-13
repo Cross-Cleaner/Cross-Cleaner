@@ -66,7 +66,15 @@ pub async fn run_custom_cleaner(
     cleaner: &CustomCleaner,
     sender: Option<mpsc::Sender<String>>,
 ) -> CleanerResult {
-    (cleaner.function)(cleaner, sender).await
+    (cleaner.function)(cleaner, sender, false).await
+}
+
+/// Measure what a custom cleaner would remove without modifying anything.
+pub async fn measure_custom_cleaner(
+    cleaner: &CustomCleaner,
+    sender: Option<mpsc::Sender<String>>,
+) -> CleanerResult {
+    (cleaner.function)(cleaner, sender, true).await
 }
 
 /// Expand placeholders: {home}, {username}, {steam}, {drive} (one entry per drive
@@ -112,7 +120,7 @@ mod tests {
             args: vec![],
             os: vec![],
             sequential: false,
-            function: |_, _| {
+            function: |_, _, _| {
                 Box::pin(async move {
                     CleanerResult {
                         files: 0,
@@ -166,7 +174,7 @@ mod tests {
     #[tokio::test]
     async fn test_run_custom_cleaner() {
         let mut cleaner = test_cleaner("run_test_1");
-        cleaner.function = |data, _sender| {
+        cleaner.function = |data, _sender, dry_run| {
             let data = data.clone();
             Box::pin(async move {
                 let mut r = CleanerResult {
@@ -188,7 +196,7 @@ mod tests {
                     sub_category: data.sub_category.clone(),
                 };
                 r.working = true;
-                r.files = 1;
+                r.files = if dry_run { 2 } else { 1 };
                 r
             })
         };
@@ -197,6 +205,10 @@ mod tests {
         assert!(result.working);
         assert_eq!(result.files, 1);
         assert_eq!(result.program.as_ref(), "TestProgram");
+
+        let measured = measure_custom_cleaner(&cleaner, None).await;
+        assert!(measured.working);
+        assert_eq!(measured.files, 2);
     }
 
     #[test]

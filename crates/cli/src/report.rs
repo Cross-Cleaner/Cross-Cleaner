@@ -211,6 +211,12 @@ pub fn scripts(ui: &Ui, output: &OutputArgs, check: bool) -> bool {
                     "hooks": script.hooks,
                     "complaints": script.complaints,
                     "error": script.error,
+                    "about": script.about.as_ref().map(|about| serde_json::json!({
+                        "name": about.name,
+                        "version": about.version,
+                        "author": about.author,
+                        "description": about.description,
+                    })),
                 })).collect::<Vec<_>>(),
                 "problems": reports.errors.iter().map(|error| error.to_string()).collect::<Vec<_>>(),
             })
@@ -274,6 +280,24 @@ fn print_script(ui: &Ui, script: &ScriptSummary) {
             if script.hooks == 1 { "" } else { "s" }
         ))
     ));
+
+    if let Some(about) = &script.about {
+        let mut line = about.name.clone();
+
+        if !about.version.is_empty() {
+            line.push_str(&format!(" {}", about.version));
+        }
+
+        if !about.description.is_empty() {
+            line.push_str(&format!(" — {}", about.description));
+        }
+
+        if !about.author.is_empty() {
+            line.push_str(&format!(" (by {})", about.author));
+        }
+
+        ui.line(&format!("    {}", ui.dim(&line)));
+    }
 
     if let Some(error) = &script.error {
         ui.line(&format!("    {}", ui.warn(error)));

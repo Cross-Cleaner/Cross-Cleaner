@@ -12,9 +12,12 @@
 
 use std::cell::Cell;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use rune::Any;
+
+use crate::session;
 
 /// What a `clean` handler removed: files, directories and bytes.
 ///
@@ -49,6 +52,41 @@ impl std::ops::AddAssign for Stats {
     }
 }
 
+/// A removal that did not happen, and why.
+///
+/// Without this a locked or forbidden file looks the same as a file that was
+/// not there: `Stats` stays zero either way, and the user sees a cleaner that
+/// silently removed less than promised. `cleaner::failures()` hands the list
+/// to the handler so a script can log it, try another approach, or tell the
+/// user what to close.
+#[derive(Debug, Clone, Any)]
+pub struct Failure {
+    /// The path that could not be removed.
+    #[rune(get)]
+    pub(crate) path: String,
+    /// Why it could not be removed, in words a log line can show.
+    #[rune(get)]
+    pub(crate) reason: String,
+    /// Size of the file that stayed behind, in bytes.
+    #[rune(get)]
+    pub(crate) size: u64,
+    /// Whether something is holding it open rather than the ACL refusing.
+    pub(crate) holds_the_file: bool,
+}
+
+impl Failure {
+    /// Whether another program holds the file open, rather than the system
+    /// refusing the delete. The two need different advice: one is "close it",
+    /// the other is "this needs an elevated profile".
+    #[rune::function(instance)]
+    fn locked(&self) -> bool {
+        self.holds_the_file
+    }
+}
+/// Most failures kept per path: enough to diagnose, bounded so a script that
+/// walks a locked tree cannot grow the list without limit.
+const MAX_FAILURES: usize = 1024;
+
 thread_local! {
     /// What the `clean` handler currently running has removed.
     ///
@@ -66,11 +104,16 @@ thread_local! {
     /// cleaner hands the handler shares the same root.
     static WITHIN: std::cell::RefCell<Option<Option<PathBuf>>> =
         const { std::cell::RefCell::new(None) };
+
+    /// Removals that were refused since [`reset`], newest last.
+    static FAILURES: std::cell::RefCell<Vec<Failure>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Forgets what a previous call counted.
 pub(crate) fn reset() {
     ACCUMULATED.with(|cell| cell.set(Stats::EMPTY));
+    FAILURES.with(|cell| cell.borrow_mut().clear());
 }
 
 /// Resolves a declared fence root, keeping "declared but unresolvable" distinct
@@ -91,6 +134,65 @@ pub(crate) fn resolve_within(root: Option<&str>) -> Option<Option<PathBuf>> {
 /// Installs a fence [`resolve_within`] has already resolved.
 pub(crate) fn set_within_resolved(fence: Option<Option<PathBuf>>) {
     WITHIN.with(|cell| *cell.borrow_mut() = fence);
+}
+
+/// The removals refused since [`reset`], as the handler may inspect them.
+pub(crate) fn failures() -> Vec<Failure> {
+    FAILURES.with(|cell| cell.borrow().clone())
+}
+
+/// Takes the failure list and forgets it, for the host after a handler returns.
+pub(crate) fn take_failures() -> Vec<Failure> {
+    FAILURES.with(|cell| std::mem::take(&mut *cell.borrow_mut()))
+}
+
+/// Records a refusal, bounded so a locked tree cannot grow the list forever.
+fn note(path: &Path, reason: impl Into<String>, holds_the_file: bool) {
+    let size = fs::symlink_metadata(path)
+        .map(|meta| if meta.is_file() { meta.len() } else { 0 })
+        .unwrap_or(0);
+
+    let failure = Failure {
+        path: path.to_string_lossy().into_owned(),
+        reason: reason.into(),
+        size,
+        holds_the_file,
+    };
+
+    FAILURES.with(|cell| {
+        let mut list = cell.borrow_mut();
+
+        if list.len() < MAX_FAILURES {
+            list.push(failure);
+        }
+    });
+}
+
+/// Whether opening `path` for writing succeeds, which is how a file held open
+/// by another program fails: the metadata is readable, the handle is not.
+fn writable(path: &Path) -> bool {
+    fs::OpenOptions::new().write(true).open(path).is_ok()
+}
+
+/// Records why `fs::remove_*` refused `path`.
+fn failed(path: &Path, error: &io::Error) {
+    // A file that vanished between the listing and the call is not a failure:
+    // the outcome the script wanted is the outcome that happened.
+    if error.kind() == io::ErrorKind::NotFound {
+        return;
+    }
+
+    let holds_the_file = error.kind() == io::ErrorKind::PermissionDenied && writable(path);
+
+    let reason = if holds_the_file {
+        "still open by another program".to_owned()
+    } else if error.kind() == io::ErrorKind::PermissionDenied {
+        "the system denied access".to_owned()
+    } else {
+        format!("the system refused: {error}")
+    };
+
+    note(path, reason, holds_the_file);
 }
 
 /// Whether `path` may be removed under the current fence.
@@ -142,6 +244,8 @@ fn denied(path: &Path) -> Stats {
         "script: refused to remove {} because it is outside the within() fence",
         path.display()
     ));
+
+    note(path, "outside the within() fence", false);
 
     Stats::EMPTY
 }
@@ -211,12 +315,25 @@ pub(crate) fn remove_files(path: &str, pattern: &str) -> Stats {
             continue;
         }
 
-        if fs::remove_file(&candidate).is_ok() {
+        if session::dry_run() {
             stats.files += 1;
 
             if !meta.file_type().is_symlink() {
                 stats.bytes += meta.len();
             }
+
+            continue;
+        }
+
+        match fs::remove_file(&candidate) {
+            Ok(()) => {
+                stats.files += 1;
+
+                if !meta.file_type().is_symlink() {
+                    stats.bytes += meta.len();
+                }
+            }
+            Err(error) => failed(&candidate, &error),
         }
     }
 
@@ -239,6 +356,7 @@ pub(crate) fn remove_directories(path: &str, pattern: &str) -> Stats {
             Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {
                 stats += remove_directory_tree(&candidate);
             }
+            Err(error) => failed(&candidate, &error),
             _ => continue,
         }
     }
@@ -255,15 +373,25 @@ pub(crate) fn remove_file(path: &str) -> Stats {
         return denied(Path::new(path));
     }
 
-    if let Ok(meta) = fs::symlink_metadata(path)
-        && !meta.is_dir()
-        && fs::remove_file(path).is_ok()
-    {
-        stats.files += 1;
+    if session::dry_run() {
+        let stats = measure_entry(Path::new(path));
+        add(stats);
+        return stats;
+    }
 
-        if !meta.file_type().is_symlink() {
-            stats.bytes += meta.len();
-        }
+    match fs::symlink_metadata(path) {
+        Ok(meta) if !meta.is_dir() => match fs::remove_file(path) {
+            Ok(()) => {
+                stats.files += 1;
+
+                if !meta.file_type().is_symlink() {
+                    stats.bytes += meta.len();
+                }
+            }
+            Err(error) => failed(Path::new(path), &error),
+        },
+        Err(error) => failed(Path::new(path), &error),
+        _ => {}
     }
 
     add(stats);
@@ -282,6 +410,67 @@ pub(crate) fn remove_directory(path: &str) -> Stats {
         }
         _ => Stats::EMPTY,
     };
+
+    add(stats);
+    stats
+}
+
+/// Rewrites an image in a smaller format in place, or measures the savings in
+/// a dry run.
+pub(crate) fn optimize_image(path: &str) -> Option<Stats> {
+    let target = Path::new(path);
+
+    if !permitted(target) {
+        denied(target);
+        return None;
+    }
+
+    match cleaner::image_optimizer::optimize_single_with(target, session::dry_run()) {
+        Ok(saved) => {
+            if saved.bytes == 0 {
+                return None;
+            }
+
+            let stats = Stats {
+                files: saved.files,
+                folders: 0,
+                bytes: saved.bytes,
+            };
+            add(stats);
+            Some(stats)
+        }
+        Err(error) => {
+            if error.kind() != io::ErrorKind::InvalidData {
+                failed(target, &error);
+            }
+            None
+        }
+    }
+}
+
+/// Rewrites the images under `path` that match `pattern` (a glob) in place, or
+/// measures the savings in a dry run.
+pub(crate) fn optimize_images(path: &str, pattern: &str) -> Stats {
+    let mut stats = Stats::EMPTY;
+
+    for candidate in expand(path, pattern) {
+        if !permitted(&candidate) {
+            denied(&candidate);
+            continue;
+        }
+
+        match cleaner::image_optimizer::optimize_single_with(&candidate, session::dry_run()) {
+            Ok(saved) => {
+                stats.files += saved.files;
+                stats.bytes += saved.bytes;
+            }
+            Err(error) => {
+                if error.kind() != io::ErrorKind::InvalidData {
+                    failed(&candidate, &error);
+                }
+            }
+        }
+    }
 
     add(stats);
     stats
@@ -332,6 +521,12 @@ fn remove_entry(path: &Path) -> Stats {
         return denied(path);
     }
 
+    // A scan counts what this call would remove instead of removing it, so the
+    // numbers it shows are the ones a real run would report.
+    if session::dry_run() {
+        return measure_entry(path);
+    }
+
     let Ok(meta) = fs::symlink_metadata(path) else {
         return Stats::EMPTY;
     };
@@ -346,7 +541,10 @@ fn remove_entry(path: &Path) -> Stats {
                 folders: 0,
                 bytes: 0,
             },
-            Err(_) => Stats::EMPTY,
+            Err(error) => {
+                failed(path, &error);
+                Stats::EMPTY
+            }
         };
     }
 
@@ -361,7 +559,10 @@ fn remove_entry(path: &Path) -> Stats {
                     folders: 1,
                     bytes: 0,
                 },
-                Err(_) => Stats::EMPTY,
+                Err(error) => {
+                    failed(path, &error);
+                    Stats::EMPTY
+                }
             };
         }
 
@@ -374,11 +575,72 @@ fn remove_entry(path: &Path) -> Stats {
             folders: 0,
             bytes: meta.len(),
         },
-        Err(_) => Stats::EMPTY,
+        Err(error) => {
+            failed(path, &error);
+            Stats::EMPTY
+        }
     }
 }
 
+/// What removing `path` would count, without removing it.
+///
+/// Mirrors [`remove_entry`] exactly, including the rule that a link is counted
+/// as a file and a reparse-point directory as a folder, so a preview and the
+/// real run report the same numbers.
+fn measure_entry(path: &Path) -> Stats {
+    let Ok(meta) = fs::symlink_metadata(path) else {
+        return Stats::EMPTY;
+    };
+
+    let kind = meta.file_type();
+
+    if kind.is_symlink() {
+        return Stats {
+            files: 1,
+            folders: 0,
+            bytes: 0,
+        };
+    }
+
+    if kind.is_dir() {
+        if !inside_fence(path) {
+            return Stats {
+                files: 0,
+                folders: 1,
+                bytes: 0,
+            };
+        }
+
+        return measure_directory_tree(path);
+    }
+
+    Stats {
+        files: 1,
+        folders: 0,
+        bytes: meta.len(),
+    }
+}
+
+/// What removing `path` and everything inside it would count.
+fn measure_directory_tree(path: &Path) -> Stats {
+    let mut stats = Stats::EMPTY;
+
+    if let Ok(entries) = fs::read_dir(path) {
+        for entry in entries.flatten() {
+            stats += measure_entry(&entry.path());
+        }
+    }
+
+    stats.folders += 1;
+
+    stats
+}
+
 fn remove_directory_tree(path: &Path) -> Stats {
+    if session::dry_run() {
+        return measure_directory_tree(path);
+    }
+
     let mut stats = Stats::EMPTY;
 
     if let Ok(entries) = fs::read_dir(path) {
@@ -389,8 +651,9 @@ fn remove_directory_tree(path: &Path) -> Stats {
 
     // A directory that could not be emptied stays: the engine never reports a
     // folder it did not remove.
-    if fs::remove_dir(path).is_ok() {
-        stats.folders += 1;
+    match fs::remove_dir(path) {
+        Ok(()) => stats.folders += 1,
+        Err(error) => failed(path, &error),
     }
 
     stats

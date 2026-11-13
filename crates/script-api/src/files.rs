@@ -14,6 +14,7 @@ use std::fs;
 use std::path::Path;
 use std::time::UNIX_EPOCH;
 
+use rune::Any;
 /// Reads a file as UTF-8 text. `None` if it is missing, unreadable or not text.
 pub(crate) fn read(path: &str) -> Option<String> {
     fs::read_to_string(path).ok()
@@ -290,6 +291,204 @@ pub(crate) fn is_dir(path: &str) -> bool {
     Path::new(path).is_dir()
 }
 
+/// Whether `path` is a symlink, without following it.
+pub(crate) fn is_symlink(path: &str) -> bool {
+    fs::symlink_metadata(path)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+}
+
+/// Whether `path` is a directory with no entries at all.
+///
+/// A missing path is `false`: `is_dir` is the question to ask whether it is
+/// there, and an empty answer there would be two questions in one.
+pub(crate) fn is_empty_dir(path: &str) -> bool {
+    fs::read_dir(path)
+        .map(|mut entries| entries.next().is_none())
+        .unwrap_or(false)
+}
+
+/// The canonical, absolute form of `path`, or `None` when it does not exist.
+pub(crate) fn canonical(path: &str) -> Option<String> {
+    fs::canonicalize(path)
+        .ok()
+        .map(|path| path.to_string_lossy().into_owned())
+}
+
+/// The extension of `path`, without the dot.
+pub(crate) fn extension(path: &str) -> Option<String> {
+    Path::new(path)
+        .extension()
+        .map(|extension| extension.to_string_lossy().into_owned())
+}
+
+/// The file name of `path` without its extension.
+pub(crate) fn stem(path: &str) -> Option<String> {
+    Path::new(path)
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+}
+
+/// The value of the environment variable `name`.
+pub(crate) fn env(name: &str) -> Option<String> {
+    std::env::var_os(name).map(|value| value.to_string_lossy().into_owned())
+}
+
+/// The CPU architecture this binary was built for.
+pub(crate) fn arch() -> String {
+    std::env::consts::ARCH.to_owned()
+}
+
+/// The per-user application data directory of the platform.
+///
+/// This is where programs keep caches that belong to one account
+/// (`%LOCALAPPDATA%` on Windows, `~/.local/share` or `$XDG_DATA_HOME` on
+/// Linux, `~/Library/Application Support` on macOS), as opposed to
+/// [`appdata`], which is Cross Cleaner's own directory.
+pub(crate) fn local_appdata() -> String {
+    #[cfg(windows)]
+    {
+        return env("LOCALAPPDATA").unwrap_or_else(|| home());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        return format!("{}/Library/Application Support", home());
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        env("XDG_DATA_HOME").unwrap_or_else(|| format!("{}/.local/share", home()))
+    }
+}
+
+/// The platform's temporary directory.
+pub(crate) fn temp() -> String {
+    std::env::temp_dir().to_string_lossy().into_owned()
+}
+
+/// `%PROGRAMDATA%` on Windows, `None` elsewhere.
+pub(crate) fn program_data() -> Option<String> {
+    #[cfg(windows)]
+    {
+        return env("PROGRAMDATA");
+    }
+
+    #[allow(unreachable_code)]
+    None
+}
+
+/// `%ProgramFiles%` on Windows, `None` elsewhere.
+pub(crate) fn program_files() -> Option<String> {
+    #[cfg(windows)]
+    {
+        return env("ProgramFiles");
+    }
+
+    #[allow(unreachable_code)]
+    None
+}
+
+/// The drives of the machine, as `C:` style roots. Empty when there are none.
+pub(crate) fn drives() -> Vec<String> {
+    database::cleaner_database::expand_path("{drive}")
+        .into_iter()
+        .filter(|path| !path.contains("{drive}"))
+        .collect()
+}
+
+/// The first drive, or an empty string when the machine reports none.
+pub(crate) fn drive() -> String {
+    drives().into_iter().next().unwrap_or_default()
+}
+
+/// The Steam installation directory, or an empty string when Steam is absent.
+pub(crate) fn steam() -> String {
+    database::cleaner_database::expand_path("{steam}")
+        .into_iter()
+        .next()
+        .unwrap_or_default()
+}
+
+/// What a path is, in one call.
+///
+/// `stat` answers for the path itself and never follows a symlink, the same
+/// way the removal functions treat one.
+#[derive(Debug, Clone, Any)]
+pub struct FileInfo {
+    /// Size in bytes (`0` for a directory).
+    #[rune(get)]
+    pub(crate) size: u64,
+    /// Last modification time in seconds since the Unix epoch.
+    #[rune(get)]
+    pub(crate) modified: Option<u64>,
+    /// Creation time in seconds since the Unix epoch, when the filesystem has it.
+    #[rune(get)]
+    pub(crate) created: Option<u64>,
+    /// Whether it is a regular file.
+    #[rune(get)]
+    pub(crate) is_file: bool,
+    /// Whether it is a directory.
+    #[rune(get)]
+    pub(crate) is_dir: bool,
+    /// Whether it is a symlink.
+    #[rune(get)]
+    pub(crate) is_symlink: bool,
+}
+
+/// [`FileInfo`] for `path`, or `None` when it does not exist.
+pub(crate) fn stat(path: &str) -> Option<FileInfo> {
+    let metadata = fs::symlink_metadata(path).ok()?;
+    let file_type = metadata.file_type();
+
+    Some(FileInfo {
+        size: if file_type.is_file() {
+            metadata.len()
+        } else {
+            0
+        },
+        modified: metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .map(|elapsed| elapsed.as_secs()),
+        created: metadata
+            .created()
+            .ok()
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .map(|elapsed| elapsed.as_secs()),
+        is_file: file_type.is_file(),
+        is_dir: file_type.is_dir(),
+        is_symlink: file_type.is_symlink(),
+    })
+}
+
+/// How many entries `pattern` matches under `base`, without removing them.
+///
+/// The pattern is the same one `remove_files` takes, so a handler can decide
+/// whether a cleanup is worth running before it runs it.
+pub(crate) fn count(base: &str, pattern: &str) -> u64 {
+    let joined = if Path::new(pattern).is_absolute() {
+        pattern.to_owned()
+    } else {
+        format!(
+            "{}/{}",
+            base.trim_end_matches(['/', '\\']),
+            pattern.trim_start_matches(['/', '\\'])
+        )
+    };
+
+    match glob::glob(&joined) {
+        Ok(paths) => paths.filter_map(Result::ok).count() as u64,
+        Err(error) => {
+            database::diag::warn(format!(
+                "script: invalid glob pattern \"{joined}\": {error}"
+            ));
+            0
+        }
+    }
+}
+
 /// Last modification time in seconds since the Unix epoch.
 pub(crate) fn modified(path: &str) -> Option<u64> {
     fs::metadata(path)
@@ -331,6 +530,128 @@ fn agent() -> ureq::Agent {
         .timeout_global(Some(std::time::Duration::from_secs(10)))
         .build()
         .into()
+}
+
+/// What one HTTP request came back with.
+#[derive(Debug, Clone, Any)]
+pub struct HttpResponse {
+    /// The HTTP status code, `200` for a normal success.
+    #[rune(get)]
+    pub(crate) status: u16,
+    body: String,
+    headers: Vec<(String, String)>,
+}
+
+impl HttpResponse {
+    /// The response body as text.
+    #[rune::function(instance)]
+    fn body(&self) -> String {
+        self.body.clone()
+    }
+
+    /// Whether the status is in the 200–299 range.
+    #[rune::function(instance)]
+    fn ok(&self) -> bool {
+        (200..300).contains(&self.status)
+    }
+
+    /// One response header, or `None` when the server did not send it.
+    #[rune::function(instance)]
+    fn header(&self, name: &str) -> Option<String> {
+        self.headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.clone())
+    }
+
+    /// Every response header as `"Name: value"`, in the order the server sent
+    /// them.
+    #[rune::function(instance)]
+    fn headers(&self) -> Vec<String> {
+        self.headers
+            .iter()
+            .map(|(key, value)| format!("{key}: {value}"))
+            .collect()
+    }
+}
+
+/// Sends one HTTP request and returns what came back.
+///
+/// `headers` are `"Name: value"` strings; `body` is sent as-is, so a JSON
+/// payload is `json::to_string(...)?`. A `timeout` of `0` keeps the ten-second
+/// default. `None` when the method is unknown or the request failed.
+pub(crate) fn http_request(
+    method: &str,
+    url: &str,
+    body: Option<String>,
+    headers: Vec<String>,
+    timeout: u64,
+) -> Option<HttpResponse> {
+    let timeout = match timeout {
+        0 => std::time::Duration::from_secs(10),
+        seconds => std::time::Duration::from_secs(seconds.min(300)),
+    };
+    let verb = method.to_ascii_uppercase();
+    let body = body.unwrap_or_default();
+    let agent = agent();
+
+    let response = match verb.as_str() {
+        "GET" => fill(agent.get(url), &headers, timeout).call(),
+        "DELETE" => fill(agent.delete(url), &headers, timeout).call(),
+        "HEAD" => fill(agent.head(url), &headers, timeout).call(),
+        "OPTIONS" => fill(agent.options(url), &headers, timeout).call(),
+        "POST" => fill(agent.post(url), &headers, timeout).send(body.as_str()),
+        "PUT" => fill(agent.put(url), &headers, timeout).send(body.as_str()),
+        "PATCH" => fill(agent.patch(url), &headers, timeout).send(body.as_str()),
+        other => {
+            database::diag::warn(format!("script: {other} {url}: unknown method"));
+            return None;
+        }
+    };
+
+    let mut response = match response {
+        Ok(response) => response,
+        Err(error) => {
+            database::diag::warn(format!("script: {verb} {url} failed: {error}"));
+            return None;
+        }
+    };
+
+    let status = response.status().as_u16();
+    let headers = response
+        .headers()
+        .iter()
+        .map(|(key, value)| {
+            (
+                key.as_str().to_owned(),
+                value.to_str().unwrap_or_default().to_owned(),
+            )
+        })
+        .collect();
+    let body = response.body_mut().read_to_string().ok()?;
+
+    Some(HttpResponse {
+        status,
+        body,
+        headers,
+    })
+}
+
+/// Adds the user's headers and the per-request timeout to a request builder.
+fn fill<Any>(
+    mut builder: ureq::RequestBuilder<Any>,
+    headers: &[String],
+    timeout: std::time::Duration,
+) -> ureq::RequestBuilder<Any> {
+    for header in headers {
+        let Some((name, value)) = header.split_once(':') else {
+            continue;
+        };
+
+        builder = builder.header(name.trim(), value.trim());
+    }
+
+    builder.config().timeout_global(Some(timeout)).build()
 }
 
 /// Fetches `url` and returns its body as text.

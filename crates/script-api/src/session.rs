@@ -14,7 +14,7 @@ use std::sync::{Mutex, MutexGuard};
 /// say `cleaner::require_api(2)?` instead of failing on an unknown name — the
 /// error a missing function gives is a compile error inside the script, which
 /// reads like the script is broken rather than the build being old.
-pub const API_LEVEL: u64 = 3;
+pub const API_LEVEL: u64 = 4;
 
 /// Set while a cleaning run is being cancelled.
 static CANCELLED: AtomicBool = AtomicBool::new(false);
@@ -130,6 +130,11 @@ thread_local! {
 /// Names the script a handler about to run belongs to.
 pub(crate) fn set_running_script(path: &str) {
     RUNNING.with(|slot| *slot.borrow_mut() = Some(path.to_owned()));
+}
+
+/// Forgets the script name once its handler returns.
+pub(crate) fn clear_running_script() {
+    RUNNING.with(|slot| *slot.borrow_mut() = None);
 }
 
 /// The script file whose handler is running, if one is.

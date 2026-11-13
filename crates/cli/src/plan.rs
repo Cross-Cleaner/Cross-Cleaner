@@ -440,6 +440,7 @@ mod tests {
     fn unreachable_cleaner(
         _: &CustomCleaner,
         _: Option<tokio::sync::mpsc::Sender<String>>,
+        _: bool,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = database::structures::CleanerResult> + Send>,
     > {

@@ -19,6 +19,13 @@ fn is_image_extension(ext: &str) -> bool {
 }
 
 pub fn optimize_single(path: &Path) -> Result<crate::custom_cleaners::GlobCleanStats, io::Error> {
+    optimize_single_with(path, false)
+}
+
+pub fn optimize_single_with(
+    path: &Path,
+    dry_run: bool,
+) -> Result<crate::custom_cleaners::GlobCleanStats, io::Error> {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -97,6 +104,12 @@ pub fn optimize_single(path: &Path) -> Result<crate::custom_cleaners::GlobCleanS
         return Ok(crate::custom_cleaners::GlobCleanStats::default());
     }
 
+    let saved = original_size - new_size;
+    if dry_run {
+        database::diag::info(format!("[image_optimize] DRY-RUN saved={saved}"));
+        return Ok(crate::custom_cleaners::GlobCleanStats::file(saved));
+    }
+
     let mut replacement = tempfile::NamedTempFile::new_in(parent)?;
     replacement.write_all(&compressed)?;
     replacement.as_file().sync_all()?;
@@ -105,7 +118,6 @@ pub fn optimize_single(path: &Path) -> Result<crate::custom_cleaners::GlobCleanS
         .set_permissions(original.permissions())?;
     replacement.persist(path).map_err(|e| e.error)?;
 
-    let saved = original_size - new_size;
     database::diag::info(format!("[image_optimize] WRITTEN saved={saved}"));
     Ok(crate::custom_cleaners::GlobCleanStats::file(saved))
 }
@@ -160,6 +172,27 @@ mod tests {
             original_size - std::fs::metadata(&path).unwrap().len()
         );
         assert_eq!(image::open(&path).unwrap().to_rgba8(), image);
+    }
+    #[test]
+    fn dry_run_measures_png_savings_without_rewriting_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("image.png");
+        let image = RgbaImage::from_fn(256, 256, |x, y| {
+            Rgba([x as u8, y as u8, (x + y) as u8, 255])
+        });
+        let file = File::create(&path).unwrap();
+        PngEncoder::new_with_quality(file, CompressionType::Fast, FilterType::NoFilter)
+            .write_image(image.as_raw(), 256, 256, image::ExtendedColorType::Rgba8)
+            .unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        let dry = optimize_single_with(&path, true).unwrap();
+        assert_eq!(dry.files, 1);
+        assert!(dry.bytes > 0);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+
+        let real = optimize_single_with(&path, false).unwrap();
+        assert_eq!(dry, real);
     }
 
     #[test]

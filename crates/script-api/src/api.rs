@@ -79,6 +79,14 @@ pub fn module() -> Result<Module, ContextError> {
     let mut module = Module::from_meta(self::module_meta)?;
 
     module.ty::<Stats>()?;
+    module.ty::<files::FileInfo>()?;
+    module.ty::<files::HttpResponse>()?;
+    module.function_meta(files::HttpResponse::body)?;
+    module.function_meta(files::HttpResponse::ok)?;
+    module.function_meta(files::HttpResponse::header)?;
+    module.function_meta(files::HttpResponse::headers)?;
+    module.ty::<remove::Failure>()?;
+    module.function_meta(remove::Failure::locked)?;
     module.function_meta(stats)?;
     module.function_meta(track)?;
 
@@ -90,6 +98,13 @@ pub fn module() -> Result<Module, ContextError> {
     module.function_meta(list)?;
     module.function_meta(is_file)?;
     module.function_meta(is_dir)?;
+    module.function_meta(is_symlink)?;
+    module.function_meta(is_empty_dir)?;
+    module.function_meta(canonical)?;
+    module.function_meta(extension)?;
+    module.function_meta(stem)?;
+    module.function_meta(count)?;
+    module.function_meta(stat)?;
     module.function_meta(modified)?;
     module.function_meta(now)?;
     module.function_meta(os)?;
@@ -106,6 +121,15 @@ pub fn module() -> Result<Module, ContextError> {
     module.function_meta(user)?;
     module.function_meta(home)?;
     module.function_meta(appdata)?;
+    module.function_meta(local_appdata)?;
+    module.function_meta(program_data)?;
+    module.function_meta(program_files)?;
+    module.function_meta(temp)?;
+    module.function_meta(env)?;
+    module.function_meta(arch)?;
+    module.function_meta(drive)?;
+    module.function_meta(drives)?;
+    module.function_meta(steam)?;
     module.function_meta(join)?;
     module.function_meta(parent)?;
     module.function_meta(filename)?;
@@ -117,10 +141,17 @@ pub fn module() -> Result<Module, ContextError> {
     module.function_meta(cancelled)?;
     module.function_meta(dry_run)?;
     module.function_meta(progress)?;
+    module.function_meta(progress_add)?;
+    module.function_meta(progress_files)?;
     module.function_meta(notify)?;
     module.function_meta(version)?;
+    module.function_meta(about)?;
     module.function_meta(require_api)?;
     module.function_meta(script_path)?;
+    module.function_meta(state_get)?;
+    module.function_meta(state_set)?;
+    module.function_meta(state_delete)?;
+    module.function_meta(state_keys)?;
 
     module.function_meta(remove_all)?;
     module.function_meta(remove_files)?;
@@ -129,17 +160,27 @@ pub fn module() -> Result<Module, ContextError> {
     module.function_meta(remove_directory)?;
     module.function_meta(size)?;
     module.function_meta(exists)?;
+    module.function_meta(trash)?;
+    module.function_meta(optimize_image)?;
+    module.function_meta(optimize_images)?;
+    module.function_meta(human_size)?;
 
+    // Removals that were refused, for a handler that wants to explain why.
+    module.function_meta(failures)?;
     // Diagnostics and network, for the finished hook.
     module.function_meta(log)?;
     module.function_meta(warn)?;
     module.function_meta(http_get)?;
     module.function_meta(http_post)?;
+    module.function_meta(http_request)?;
 
     // Hooks.
     module.function_meta(on_started)?;
     module.function_meta(on_finished)?;
     module.function_meta(on_error)?;
+    module.function_meta(on_scan)?;
+    module.function_meta(on_program_done)?;
+    module.function_meta(on_cancelled)?;
 
     // The report a finished hook receives.
     module.ty::<ProgramReport>()?;
@@ -258,6 +299,26 @@ fn progress(text: &str) {
     session::progress(text);
 }
 
+/// Adds `files` to the progress counter, for a handler that walks files itself.
+///
+/// The engine already counts what its own cleaners remove; this is for the
+/// files a handler counts while looking, so a long handler does not look
+/// stuck. It is a hint, not an accounting record: the totals in the report come
+/// from what was actually removed.
+#[rune::function]
+fn progress_add(files: u64) {
+    session::progress(&format!("+{files} files"));
+}
+
+/// Says `done` of `total` files are checked.
+///
+/// For the same case as [`progress_add`], a handler walking a tree in its own
+/// loop.
+#[rune::function]
+fn progress_files(done: u64, total: u64) {
+    session::progress(&format!("{done}/{total} files"));
+}
+
 /// Shows a desktop notification with `title` and `body`.
 ///
 /// The same notification the app itself shows, on every platform, without a
@@ -272,6 +333,21 @@ fn notify(title: &str, body: &str) {
 #[rune::function]
 fn version() -> String {
     session::version()
+}
+
+/// Describes the script itself, for `cli scripts` and a maintenance page.
+///
+/// Purely informational: a script without it works exactly the same, it just
+/// shows up under its file name with no description. Call it from `main()`.
+///
+/// ```rune
+/// pub fn main() {
+///     cleaner::about("Cache Sweeper", "1.0", "you", "clears my build caches");
+/// }
+/// ```
+#[rune::function]
+fn about(name: &str, version: &str, author: &str, description: &str) {
+    collect::about(name, version, author, description);
 }
 
 /// Fails when the build's script API is older than `level`.
@@ -291,6 +367,38 @@ fn require_api(level: u64) -> Result<(), String> {
 #[rune::function]
 fn script_path() -> Option<String> {
     session::script_path()
+}
+
+/// A value this script saved with [`state_set`] in a previous run.
+///
+/// The store is per script file, kept beside the scripts in `.state`, and
+/// survives restarts, updates and a new scan. It is plain strings: numbers,
+/// dates and lists are the script's business to format and parse.
+#[rune::function]
+fn state_get(key: &str) -> Option<String> {
+    crate::state::get(key)
+}
+
+/// Saves `value` under `key` for the next run. `true` on success.
+///
+/// Writes are atomic: a run killed mid-save keeps the previous value instead
+/// of a half written file. A preview may also save; the store is script
+/// bookkeeping, not user data.
+#[rune::function]
+fn state_set(key: &str, value: &str) -> bool {
+    crate::state::set(key, value)
+}
+
+/// Forgets `key`. `true` when it existed and the store was written.
+#[rune::function]
+fn state_delete(key: &str) -> bool {
+    crate::state::delete(key)
+}
+
+/// Every key this script has saved, sorted.
+#[rune::function]
+fn state_keys() -> Vec<String> {
+    crate::state::keys()
 }
 
 /// Whether `path` is a system location a cleaner should not remove.
@@ -322,6 +430,26 @@ fn running(programs: Vec<String>) -> bool {
 #[rune::function]
 fn stats() -> Stats {
     remove::current()
+}
+
+/// The removals this handler attempted that did not happen, with reasons.
+///
+/// A locked file or a directory the system refuses leaves the counters at
+/// zero, exactly like a file that was not there. This is how a handler tells
+/// the two apart: log the reason, remove the rest, or report that an
+/// application has to be closed first. The list is per `clean` call and holds
+/// at most 1024 entries.
+///
+/// ```rune
+/// pub fn clean(path) {
+///     for failure in cleaner::failures() {
+///         cleaner::warn(`${failure.path}: ${failure.reason}`);
+///     }
+/// }
+/// ```
+#[rune::function]
+fn failures() -> Vec<remove::Failure> {
+    remove::failures()
 }
 
 /// Records work the handler did itself, without a `cleaner::remove_*` call.
@@ -383,6 +511,70 @@ fn is_file(path: &str) -> bool {
 #[rune::function]
 fn is_dir(path: &str) -> bool {
     files::is_dir(path)
+}
+
+/// Whether `path` is a symlink, without following it.
+///
+/// A cleaner that removes a link with `remove_file` removes the link itself,
+/// never the directory it points at; this is how a handler can tell the two
+/// apart before it decides.
+#[rune::function]
+fn is_symlink(path: &str) -> bool {
+    files::is_symlink(path)
+}
+
+/// Whether `path` is a directory with no entries at all.
+///
+/// A missing path is `false`: ask [`is_dir`] first if that distinction matters.
+#[rune::function]
+fn is_empty_dir(path: &str) -> bool {
+    files::is_empty_dir(path)
+}
+
+/// The canonical, absolute form of `path`, or `None` when it does not exist.
+///
+/// Symlinks are resolved. Compare a path against `canonical("{home}")` when a
+/// rule has to know whether it is looking at the real profile or a link to it.
+#[rune::function]
+fn canonical(path: &str) -> Option<String> {
+    files::canonical(path)
+}
+
+/// The extension of `path` without the dot, lowercased as written on disk.
+#[rune::function]
+fn extension(path: &str) -> Option<String> {
+    files::extension(path)
+}
+
+/// The file name of `path` without its extension.
+#[rune::function]
+fn stem(path: &str) -> Option<String> {
+    files::stem(path)
+}
+
+/// How many entries `base/pattern` matches, without removing anything.
+///
+/// The pattern is the one [`remove_files`] takes. A handler that walks a huge
+/// cache can use this to decide whether the cleanup is worth starting.
+#[rune::function]
+fn count(base: &str, pattern: &str) -> u64 {
+    files::count(base, pattern)
+}
+
+/// What the path is, in one call: size, timestamps and file type.
+///
+/// The path itself is examined, never a symlink target, so the answer matches
+/// what [`remove_file`] would do with it.
+///
+/// ```rune
+/// let info = cleaner::stat(path)?;
+/// if info.is_file && info.size > 100 * 1024 * 1024 {
+///     cleaner::remove_file(path);
+/// }
+/// ```
+#[rune::function]
+fn stat(path: &str) -> Option<files::FileInfo> {
+    files::stat(path)
 }
 
 /// Last modification time in seconds since the Unix epoch.
@@ -523,6 +715,114 @@ fn appdata() -> String {
     files::appdata()
 }
 
+/// The per-user application data directory: `%LOCALAPPDATA%` on Windows,
+/// `$XDG_DATA_HOME` (or `~/.local/share`) on Linux, `Application Support` on
+/// macOS.
+///
+/// This is where other programs keep their per-user caches. It is not
+/// [`appdata`], which is Cross Cleaner's own directory.
+#[rune::function]
+fn local_appdata() -> String {
+    files::local_appdata()
+}
+
+/// `%PROGRAMDATA%` on Windows; `None` on the platforms that have no equivalent.
+#[rune::function]
+fn program_data() -> Option<String> {
+    files::program_data()
+}
+
+/// `%ProgramFiles%` on Windows; `None` on the platforms that have no equivalent.
+#[rune::function]
+fn program_files() -> Option<String> {
+    files::program_files()
+}
+
+/// The platform's temporary directory.
+///
+/// The same directory `std::env::temp_dir()` returns, already expanded.
+#[rune::function]
+fn temp() -> String {
+    files::temp()
+}
+
+/// The value of the environment variable `name`, or `None`.
+///
+/// Useful for paths a script should follow rather than guess:
+/// `cleaner::env("STEAM_PATH")`.
+#[rune::function]
+fn env(name: &str) -> Option<String> {
+    files::env(name)
+}
+
+/// The CPU architecture this build runs on, e.g. `"x86_64"` or `"aarch64"`.
+#[rune::function]
+fn arch() -> String {
+    files::arch()
+}
+
+/// The drives of the machine as `C:` style roots; empty when there are none.
+#[rune::function]
+fn drives() -> Vec<String> {
+    files::drives()
+}
+
+/// Moves `path` to the system trash instead of deleting it. `true` on success.
+///
+/// A preview never moves anything, so this is `false` while [`dry_run`] is
+/// true. The trash is bounded by the platform, not by this call: a file too
+/// large for it fails, and the handler still has `remove_file` for that case.
+#[rune::function]
+fn trash(path: &str) -> bool {
+    if session::dry_run() {
+        return false;
+    }
+
+    cleaner::trash::send(std::path::Path::new(path)).is_ok()
+}
+
+/// Rewrites an image in a smaller format, in place, and reports the bytes saved.
+///
+/// Only the formats the engine itself optimizes are handled (PNG, JPEG, WebP,
+/// GIF, BMP); anything else, and any image that would not get smaller, returns
+/// `None`. The file is replaced atomically, so a crash cannot leave a half
+/// written image behind. A preview measures the savings without rewriting the file.
+#[rune::function]
+fn optimize_image(path: &str) -> Option<Stats> {
+    remove::optimize_image(path)
+}
+
+/// Rewrites every image under `path` that matches `pattern` (a glob) in place,
+/// and reports the total files optimized and bytes saved.
+///
+/// Non-image files and images that would not get smaller are skipped. A preview
+/// measures the savings without rewriting the files.
+#[rune::function]
+fn optimize_images(path: &str, pattern: &str) -> Stats {
+    remove::optimize_images(path, pattern)
+}
+
+/// Formats `bytes` the way the UI shows sizes: `"1.4 MB"`.
+#[rune::function]
+fn human_size(bytes: u64) -> String {
+    database::utils::get_file_size_string(bytes)
+}
+
+/// The first drive, or an empty string when the machine reports none.
+///
+/// A convenience for the common `for drive in cleaner::drives()` loop that
+/// only needs the system drive.
+#[rune::function]
+fn drive() -> String {
+    files::drive()
+}
+
+/// The Steam installation directory, or an empty string when Steam is absent.
+#[rune::function]
+fn steam() -> String {
+    files::steam()
+}
+
 /// Joins path segments with the platform separator.
 ///
 /// The alternative — `format!("{}/{}", a, b)` — produces a doubled or stray
@@ -652,6 +952,40 @@ fn http_post(url: &str, body: &str) -> bool {
     files::http_post(url, body)
 }
 
+/// Sends one HTTP request and returns the response, or `None` on failure.
+///
+/// `http_get` and `http_post` cover the common cases; this is for the rest: a
+/// `PUT` to an upload endpoint, a `HEAD` to see whether a file is still there,
+/// a custom header the server wants. `headers` are `"Name: value"` strings
+/// and `body` is sent as-is — a JSON payload is `json::to_string(...)?`.
+///
+/// ```rune
+/// pub async fn notify(report) {
+///     let body = json::to_string(#{ "text": report.summary() })?;
+///     let response = cleaner::http_request(
+///         "PUT",
+///         "https://example.com/status",
+///         Some(body),
+///         ["Authorization: Bearer token"],
+///         0,
+///     );
+///
+///     if let Some(response) = response {
+///         cleaner::log(format!("server said {}", response.status));
+///     }
+/// }
+/// ```
+#[rune::function]
+fn http_request(
+    method: &str,
+    url: &str,
+    body: Option<String>,
+    headers: Vec<String>,
+    timeout: u64,
+) -> Option<files::HttpResponse> {
+    files::http_request(method, url, body, headers, timeout)
+}
+
 // --- hooks -----------------------------------------------------------------
 
 /// Registers `handler` to run once, before a cleaning run starts deleting.
@@ -718,6 +1052,59 @@ fn on_finished(handler: &str) {
 #[rune::function]
 fn on_error(handler: &str) {
     collect::hook(HookKind::Failed, handler.to_owned());
+}
+
+/// Registers `handler` to run once before a scan starts.
+///
+/// A scan — the preview a frontend shows before anything is removed — is a good
+/// time to tell a script that the numbers it is about to produce are estimates.
+/// The handler runs on the same thread as the scan, before any cleaner runs.
+///
+/// ```rune
+/// pub fn main() { cleaner::on_scan("mark_estimates"); }
+///
+/// pub fn mark_estimates() {
+///     cleaner::log("the numbers below are estimates");
+/// }
+/// ```
+#[rune::function]
+fn on_scan(handler: &str) {
+    collect::hook(HookKind::Scan, handler.to_owned());
+}
+
+/// Registers `handler` to run after each program is cleaned.
+///
+/// The handler receives one program's report: its name, files, folders, bytes
+/// and categories. It runs synchronously between programs, so keep it short.
+///
+/// ```rune
+/// pub fn main() { cleaner::on_program_done("note_program"); }
+///
+/// pub fn note_program(report) {
+///     cleaner::log(format!("{}: {} files", report.program, report.files));
+/// }
+/// ```
+#[rune::function]
+fn on_program_done(handler: &str) {
+    collect::hook(HookKind::ProgramDone, handler.to_owned());
+}
+
+/// Registers `handler` to run once when the user stops a run.
+///
+/// The handler is called after the workers have stopped, with no arguments, on
+/// a background thread. A script that saves progress in `on_started` can undo
+/// or record it here.
+///
+/// ```rune
+/// pub fn main() { cleaner::on_cancelled("clean_up"); }
+///
+/// pub fn clean_up() {
+///     cleaner::log("the run was stopped");
+/// }
+/// ```
+#[rune::function]
+fn on_cancelled(handler: &str) {
+    collect::hook(HookKind::Cancelled, handler.to_owned());
 }
 
 // --- builders --------------------------------------------------------------
@@ -1773,6 +2160,21 @@ pub struct RunTotals {
     pub denied_bytes: u64,
 }
 
+/// What one cleaned program reports to an `on_program_done` handler.
+pub(crate) fn program_report(cleared: &Cleared) -> ProgramReport {
+    ProgramReport {
+        program: cleared.program.to_string(),
+        files: cleared.removed_files,
+        folders: cleared.removed_directories,
+        bytes: cleared.removed_bytes,
+        categories: cleared
+            .affected_categories
+            .iter()
+            .map(|category| category.to_string())
+            .collect(),
+        size: database::utils::get_file_size_string(cleared.removed_bytes),
+    }
+}
 /// Builds the report from a finished run.
 pub(crate) fn report(
     totals: RunTotals,
