@@ -80,12 +80,38 @@ runs:
           archlinux:latest \
           bash -c '
             set -euo pipefail
-            # makepkg ships in the pacman package on Arch.
-            pacman -Sy --noconfirm --needed pacman >/dev/null
+            # makepkg ships in the image, so nothing is installed and no
+            # mirror is asked for anything.
+            #
+            # This is deliberate, not an omission. The step used to run
+            # `pacman -Sy --noconfirm --needed pacman`, and that is a partial
+            # upgrade: `-Sy` refreshes the databases but then installs only
+            # the dependency closure of pacman on top of whatever else the image
+            # was built with. Any package inside that closure that the new
+            # repository build wants newer than the image carries -- glibc,
+            # libgpg-error, icu -- then contradicts an older pinned package
+            # still installed next to it, and pacman gives up with
+            #
+            #   error: failed to prepare transaction (could not satisfy dependencies)
+            #
+            # which is exactly the failure this avoids. Arch supports `-Syu`
+            # and nothing else, and even a full upgrade buys nothing here:
+            # `makepkg --printsrcinfo` reads the PKGBUILD and writes .SRCINFO,
+            # and never touches the sync databases or the keyring. The
+            # per-architecture source_/sha256sums_ arrays the -bin PKGBUILD
+            # uses are understood by every makepkg since pacman 6.0 (2021).
+            #
+            # Failing loudly rather than silently, for the day an image drops
+            # the package that carries makepkg: a missing makepkg would
+            # otherwise surface as an empty .SRCINFO read back on the host.
+            command -v makepkg >/dev/null || {
+              echo "this archlinux image ships no makepkg" >&2
+              exit 1
+            }
             # makepkg refuses to run as root, and it is right to: it drops
             # privileges nowhere and builds into paths it will later chown.
-            # pacman needs root to install, makepkg must not have it, so the
-            # two run as different users in the same container.
+            # So it runs as an unprivileged user with its own home, and the
+            # bind mount is handed over to that user first.
             useradd --create-home --shell /bin/bash builder
             chown -R builder:builder /pkg
             su builder -c "cd /pkg && makepkg --printsrcinfo -p PKGBUILD > .SRCINFO"
