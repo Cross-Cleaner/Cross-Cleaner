@@ -42,7 +42,11 @@ static BLOCKING: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore:
 
 // macOS uses /var as a system link. Start at the first path component so those
 // paths still work, then reject links below it while walking directory handles.
-fn open_dir_without_links(path: &Path) -> io::Result<cap_std::fs::Dir> {
+///
+/// Public because the script API removes through the same rule: it keeps the
+/// returned handle and does every removal relative to it, so a link swapped in
+/// after the path was checked cannot redirect the operation.
+pub fn open_dir_without_links(path: &Path) -> io::Result<cap_std::fs::Dir> {
     let mut components = path.components().peekable();
     let mut anchor = PathBuf::new();
     if path.is_absolute() {

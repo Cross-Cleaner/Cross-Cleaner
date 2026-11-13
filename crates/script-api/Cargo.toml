@@ -9,6 +9,14 @@ database = { path = "../database" }
 # engine on what "the browser is open" means, and there is exactly one answer.
 cleaner = { path = "../cleaner" }
 glob = "0.3.4"
+# Removal goes through directory handles, not paths: cap-std resolves a path one
+# component at a time without following links, so a link swapped in between the
+# check and the delete cannot redirect it. The same crates the engine deletes
+# through, so a script and a built-in cleaner cannot disagree about a link.
+cap-std = "4"
+# `FollowSymlinks::No` for opening a directory entry a second time, which
+# cap-std itself only exposes through this extension trait.
+cap-fs-ext = "4"
 rune = "0.14.2"
 # The standard Rune modules scripts are written against: `std::fs` for reading,
 # `json` for building webhook payloads, `rand` for jitter, `time` for deadlines,

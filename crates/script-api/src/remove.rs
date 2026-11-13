@@ -9,12 +9,26 @@
 //! Symlinks are removed as links and never followed, so a script cannot be
 //! tricked into deleting outside the path it was pointed at by a link someone
 //! else placed there.
+//!
+//! Nothing is deleted by path either, and that is the second half of the same
+//! guarantee. Cleaning a system temporary directory means deleting inside a
+//! directory anything on the machine can write to, so a check followed by a
+//! delete on the same *path* leaves a window: another process can replace a
+//! directory with a junction between the two and the delete then happens
+//! wherever the junction points. Here the path is resolved once, component by
+//! component without following links, into a directory handle ([`Entry`]), and
+//! every removal is `remove_file(name)`/`remove_dir(name)` relative to that
+//! handle — a path is never resolved a second time, so there is no second answer
+//! to disagree with the first.
 
 use std::cell::Cell;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
+use cap_std::fs::{Dir, Metadata, OpenOptions};
 use rune::Any;
 
 use crate::session;
@@ -147,11 +161,7 @@ pub(crate) fn take_failures() -> Vec<Failure> {
 }
 
 /// Records a refusal, bounded so a locked tree cannot grow the list forever.
-fn note(path: &Path, reason: impl Into<String>, holds_the_file: bool) {
-    let size = fs::symlink_metadata(path)
-        .map(|meta| if meta.is_file() { meta.len() } else { 0 })
-        .unwrap_or(0);
-
+fn note(path: &Path, reason: impl Into<String>, size: u64, holds_the_file: bool) {
     let failure = Failure {
         path: path.to_string_lossy().into_owned(),
         reason: reason.into(),
@@ -168,21 +178,91 @@ fn note(path: &Path, reason: impl Into<String>, holds_the_file: bool) {
     });
 }
 
-/// Whether opening `path` for writing succeeds, which is how a file held open
-/// by another program fails: the metadata is readable, the handle is not.
-fn writable(path: &Path) -> bool {
-    fs::OpenOptions::new().write(true).open(path).is_ok()
+/// One entry, addressed by the directory that holds it and its own name.
+///
+/// The handle was walked from the filesystem root one component at a time,
+/// refusing links, so it names the directory the fence was checked against. A
+/// link dropped where that directory used to be cannot redirect a removal,
+/// because this type never resolves a path again: the leaf is `remove_file(name)`
+/// on the handle. The leaf itself is never followed either, so a link in its
+/// place is removed as a link.
+struct Entry {
+    dir: Dir,
+    name: OsString,
 }
 
-/// Records why `fs::remove_*` refused `path`.
-fn failed(path: &Path, error: &io::Error) {
+impl Entry {
+    /// Pins the entry `path` names.
+    fn open(path: &Path) -> io::Result<Entry> {
+        let name = path
+            .file_name()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path names no entry"))?
+            .to_os_string();
+
+        let parent = match path.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent,
+            _ => Path::new("."),
+        };
+
+        Ok(Entry {
+            dir: cleaner::open_dir_without_links(parent)?,
+            name,
+        })
+    }
+
+    /// What is at the entry, seen without following a link.
+    fn metadata(&self) -> io::Result<Metadata> {
+        metadata_at(&self.dir, &self.name)
+    }
+
+    fn dir(&self) -> &Dir {
+        &self.dir
+    }
+
+    fn name(&self) -> &OsStr {
+        &self.name
+    }
+}
+
+/// Metadata of `name` inside `dir`, without following a link.
+fn metadata_at(dir: &Dir, name: &OsStr) -> io::Result<Metadata> {
+    dir.symlink_metadata(name)
+}
+
+/// Opens `name` inside `dir` as a directory.
+///
+/// The leaf was already inspected without following links, and cap-std resolves
+/// this path one component at a time and refuses to leave `dir`, so a junction
+/// planted in the window between the two cannot lead outside the handle tree.
+fn open_child_dir(dir: &Dir, name: &OsStr) -> io::Result<Dir> {
+    dir.open_dir(name)
+}
+
+/// Whether opening the entry for writing succeeds inside its pinned directory,
+/// which is how a file held open by another program fails: the metadata is
+/// readable, the handle is not. Relative to the same handle the delete used, so
+/// the answer describes the entry that was refused and not whatever the path
+/// names by now.
+fn writable(dir: &Dir, name: &OsStr) -> bool {
+    let mut options = OpenOptions::new();
+    options.write(true);
+    options.follow(FollowSymlinks::No);
+
+    dir.open_with(name, &options).is_ok()
+}
+
+/// Records why a removal relative to a handle was refused.
+fn failed_at(dir: &Dir, name: &OsStr, path: &Path, error: &io::Error) {
     // A file that vanished between the listing and the call is not a failure:
     // the outcome the script wanted is the outcome that happened.
-    if error.kind() == io::ErrorKind::NotFound {
+    if matches!(
+        error.kind(),
+        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+    ) {
         return;
     }
 
-    let holds_the_file = error.kind() == io::ErrorKind::PermissionDenied && writable(path);
+    let holds_the_file = error.kind() == io::ErrorKind::PermissionDenied && writable(dir, name);
 
     let reason = if holds_the_file {
         "still open by another program".to_owned()
@@ -192,7 +272,51 @@ fn failed(path: &Path, error: &io::Error) {
         format!("the system refused: {error}")
     };
 
-    note(path, reason, holds_the_file);
+    let size = metadata_at(dir, name)
+        .map(|meta| if meta.is_file() { meta.len() } else { 0 })
+        .unwrap_or(0);
+
+    note(path, reason, size, holds_the_file);
+}
+
+/// Records why a path-based operation was refused.
+///
+/// Only the image optimizer still works by path; everything that deletes goes
+/// through [`failed_at`].
+fn failed_path(path: &Path, error: &io::Error) {
+    if error.kind() == io::ErrorKind::NotFound {
+        return;
+    }
+
+    let holds_the_file = error.kind() == io::ErrorKind::PermissionDenied
+        && fs::OpenOptions::new().write(true).open(path).is_ok();
+
+    let reason = if holds_the_file {
+        "still open by another program".to_owned()
+    } else if error.kind() == io::ErrorKind::PermissionDenied {
+        "the system denied access".to_owned()
+    } else {
+        format!("the system refused: {error}")
+    };
+
+    let size = fs::symlink_metadata(path)
+        .map(|meta| if meta.is_file() { meta.len() } else { 0 })
+        .unwrap_or(0);
+
+    note(path, reason, size, holds_the_file);
+}
+
+/// Records a path that could not even be pinned to a directory handle.
+fn unresolved(path: &Path, error: &io::Error) {
+    // Nothing to report when the entry is simply gone.
+    if matches!(
+        error.kind(),
+        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+    ) {
+        return;
+    }
+
+    note(path, format!("the system refused: {error}"), 0, false);
 }
 
 /// Whether `path` may be removed under the current fence.
@@ -224,19 +348,6 @@ fn permitted(path: &Path) -> bool {
     })
 }
 
-/// Whether `path` is a directory that lives inside the fence, so its contents
-/// can be walked. A reparse point is never descended into.
-fn inside_fence(path: &Path) -> bool {
-    WITHIN.with(|cell| match cell.borrow().as_ref() {
-        None => true,
-        Some(None) => false,
-        Some(Some(root)) => match fs::canonicalize(path) {
-            Ok(resolved) => resolved.starts_with(root),
-            Err(_) => false,
-        },
-    })
-}
-
 /// Reports a removal the fence stopped, so a silent `Stats::EMPTY` does not read
 /// as "there was nothing to remove".
 fn denied(path: &Path) -> Stats {
@@ -245,7 +356,7 @@ fn denied(path: &Path) -> Stats {
         path.display()
     ));
 
-    note(path, "outside the within() fence", false);
+    note(path, "outside the within() fence", 0, false);
 
     Stats::EMPTY
 }
@@ -279,17 +390,25 @@ fn add(stats: Stats) {
 
 /// Removes everything inside `path`, keeping `path` itself.
 pub(crate) fn remove_all(path: &str) -> Stats {
-    let mut stats = Stats::EMPTY;
+    let target = Path::new(path);
 
-    if !permitted(Path::new(path)) {
-        return denied(Path::new(path));
+    if !permitted(target) {
+        return denied(target);
     }
 
-    if let Ok(entries) = fs::read_dir(path) {
-        for entry in entries.flatten() {
-            stats += remove_entry(&entry.path());
+    let dir = match cleaner::open_dir_without_links(target) {
+        Ok(dir) => dir,
+        Err(error) => {
+            unresolved(target, &error);
+            return Stats::EMPTY;
         }
-    }
+    };
+
+    let stats = if session::dry_run() {
+        measure_children(&dir)
+    } else {
+        remove_children(&dir, target)
+    };
 
     add(stats);
     stats
@@ -305,7 +424,15 @@ pub(crate) fn remove_files(path: &str, pattern: &str) -> Stats {
             continue;
         }
 
-        let Ok(meta) = fs::symlink_metadata(&candidate) else {
+        let entry = match Entry::open(&candidate) {
+            Ok(entry) => entry,
+            Err(error) => {
+                unresolved(&candidate, &error);
+                continue;
+            }
+        };
+
+        let Ok(meta) = entry.metadata() else {
             continue;
         };
 
@@ -315,25 +442,24 @@ pub(crate) fn remove_files(path: &str, pattern: &str) -> Stats {
             continue;
         }
 
+        let counted = Stats {
+            files: 1,
+            folders: 0,
+            bytes: if meta.file_type().is_symlink() {
+                0
+            } else {
+                meta.len()
+            },
+        };
+
         if session::dry_run() {
-            stats.files += 1;
-
-            if !meta.file_type().is_symlink() {
-                stats.bytes += meta.len();
-            }
-
+            stats += counted;
             continue;
         }
 
-        match fs::remove_file(&candidate) {
-            Ok(()) => {
-                stats.files += 1;
-
-                if !meta.file_type().is_symlink() {
-                    stats.bytes += meta.len();
-                }
-            }
-            Err(error) => failed(&candidate, &error),
+        match entry.dir().remove_file(entry.name()) {
+            Ok(()) => stats += counted,
+            Err(error) => failed_at(entry.dir(), entry.name(), &candidate, &error),
         }
     }
 
@@ -352,12 +478,22 @@ pub(crate) fn remove_directories(path: &str, pattern: &str) -> Stats {
             continue;
         }
 
-        match fs::symlink_metadata(&candidate) {
-            Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {
-                stats += remove_directory_tree(&candidate);
+        let entry = match Entry::open(&candidate) {
+            Ok(entry) => entry,
+            Err(error) => {
+                unresolved(&candidate, &error);
+                continue;
             }
-            Err(error) => failed(&candidate, &error),
-            _ => continue,
+        };
+
+        match entry.metadata() {
+            // A link that looks like a directory is left alone: `remove_files`
+            // is where a link is removed, and descending is never an option.
+            Ok(meta) if meta.is_dir() => {
+                stats += remove_tree(entry.dir(), entry.name(), &candidate)
+            }
+            Ok(_) => {}
+            Err(error) => failed_at(entry.dir(), entry.name(), &candidate, &error),
         }
     }
 
@@ -367,32 +503,61 @@ pub(crate) fn remove_directories(path: &str, pattern: &str) -> Stats {
 
 /// Removes one file.
 pub(crate) fn remove_file(path: &str) -> Stats {
-    let mut stats = Stats::EMPTY;
+    let target = Path::new(path);
 
-    if !permitted(Path::new(path)) {
-        return denied(Path::new(path));
+    if !permitted(target) {
+        return denied(target);
     }
 
-    if session::dry_run() {
-        let stats = measure_entry(Path::new(path));
-        add(stats);
-        return stats;
+    let entry = match Entry::open(target) {
+        Ok(entry) => entry,
+        Err(error) => {
+            unresolved(target, &error);
+            return Stats::EMPTY;
+        }
+    };
+
+    let meta = match entry.metadata() {
+        Ok(meta) => meta,
+        Err(error) => {
+            failed_at(entry.dir(), entry.name(), target, &error);
+            return Stats::EMPTY;
+        }
+    };
+
+    // A directory is `remove_directory`'s business: this primitive removes one
+    // entry and never a tree by accident.
+    if meta.is_dir() {
+        return Stats::EMPTY;
     }
 
-    match fs::symlink_metadata(path) {
-        Ok(meta) if !meta.is_dir() => match fs::remove_file(path) {
-            Ok(()) => {
-                stats.files += 1;
-
-                if !meta.file_type().is_symlink() {
-                    stats.bytes += meta.len();
-                }
+    let stats = if session::dry_run() {
+        Stats {
+            files: 1,
+            folders: 0,
+            bytes: if meta.file_type().is_symlink() {
+                0
+            } else {
+                meta.len()
+            },
+        }
+    } else {
+        match entry.dir().remove_file(entry.name()) {
+            Ok(()) => Stats {
+                files: 1,
+                folders: 0,
+                bytes: if meta.file_type().is_symlink() {
+                    0
+                } else {
+                    meta.len()
+                },
+            },
+            Err(error) => {
+                failed_at(entry.dir(), entry.name(), target, &error);
+                Stats::EMPTY
             }
-            Err(error) => failed(Path::new(path), &error),
-        },
-        Err(error) => failed(Path::new(path), &error),
-        _ => {}
-    }
+        }
+    };
 
     add(stats);
     stats
@@ -400,15 +565,27 @@ pub(crate) fn remove_file(path: &str) -> Stats {
 
 /// Removes one directory with everything inside it.
 pub(crate) fn remove_directory(path: &str) -> Stats {
-    if !permitted(Path::new(path)) {
-        return denied(Path::new(path));
+    let target = Path::new(path);
+
+    if !permitted(target) {
+        return denied(target);
     }
 
-    let stats = match fs::symlink_metadata(path) {
-        Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {
-            remove_directory_tree(Path::new(path))
+    let entry = match Entry::open(target) {
+        Ok(entry) => entry,
+        Err(error) => {
+            unresolved(target, &error);
+            return Stats::EMPTY;
         }
-        _ => Stats::EMPTY,
+    };
+
+    let stats = match entry.metadata() {
+        Ok(meta) if meta.is_dir() => remove_tree(entry.dir(), entry.name(), target),
+        Ok(_) => Stats::EMPTY,
+        Err(error) => {
+            failed_at(entry.dir(), entry.name(), target, &error);
+            Stats::EMPTY
+        }
     };
 
     add(stats);
@@ -441,7 +618,7 @@ pub(crate) fn optimize_image(path: &str) -> Option<Stats> {
         }
         Err(error) => {
             if error.kind() != io::ErrorKind::InvalidData {
-                failed(target, &error);
+                failed_path(target, &error);
             }
             None
         }
@@ -466,7 +643,7 @@ pub(crate) fn optimize_images(path: &str, pattern: &str) -> Stats {
             }
             Err(error) => {
                 if error.kind() != io::ErrorKind::InvalidData {
-                    failed(&candidate, &error);
+                    failed_path(&candidate, &error);
                 }
             }
         }
@@ -516,18 +693,32 @@ pub(crate) fn exists(path: &str) -> bool {
     fs::symlink_metadata(path).is_ok()
 }
 
-fn remove_entry(path: &Path) -> Stats {
-    if !permitted(path) {
-        return denied(path);
+/// Removes every entry inside `dir`.
+fn remove_children(dir: &Dir, path: &Path) -> Stats {
+    let mut stats = Stats::EMPTY;
+
+    if let Ok(entries) = dir.entries() {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            stats += remove_entry(dir, &name, &path.join(&name));
+        }
     }
 
+    stats
+}
+
+/// Removes one entry inside `dir`, or counts what removing it would free.
+///
+/// `path` is the same entry spelled out, for the failure log and the nested
+/// joins only; nothing here resolves it.
+fn remove_entry(dir: &Dir, name: &OsStr, path: &Path) -> Stats {
     // A scan counts what this call would remove instead of removing it, so the
     // numbers it shows are the ones a real run would report.
     if session::dry_run() {
-        return measure_entry(path);
+        return measure_entry(dir, name);
     }
 
-    let Ok(meta) = fs::symlink_metadata(path) else {
+    let Ok(meta) = metadata_at(dir, name) else {
         return Stats::EMPTY;
     };
 
@@ -535,60 +726,43 @@ fn remove_entry(path: &Path) -> Stats {
 
     if kind.is_symlink() {
         // The link itself, never its target.
-        return match fs::remove_file(path) {
+        return match dir.remove_file(name) {
             Ok(()) => Stats {
                 files: 1,
                 folders: 0,
                 bytes: 0,
             },
             Err(error) => {
-                failed(path, &error);
+                failed_at(dir, name, path, &error);
                 Stats::EMPTY
             }
         };
     }
 
     if kind.is_dir() {
-        // A directory that is a reparse point can point anywhere; descending
-        // into it would delete outside the fence. Remove the link itself, which
-        // `remove_dir` does without following it, and never its contents.
-        if !inside_fence(path) {
-            return match fs::remove_dir(path) {
-                Ok(()) => Stats {
-                    files: 0,
-                    folders: 1,
-                    bytes: 0,
-                },
-                Err(error) => {
-                    failed(path, &error);
-                    Stats::EMPTY
-                }
-            };
-        }
-
-        return remove_directory_tree(path);
+        return remove_tree(dir, name, path);
     }
 
-    match fs::remove_file(path) {
+    match dir.remove_file(name) {
         Ok(()) => Stats {
             files: 1,
             folders: 0,
             bytes: meta.len(),
         },
         Err(error) => {
-            failed(path, &error);
+            failed_at(dir, name, path, &error);
             Stats::EMPTY
         }
     }
 }
 
-/// What removing `path` would count, without removing it.
+/// What removing `name` inside `dir` would count, without removing it.
 ///
 /// Mirrors [`remove_entry`] exactly, including the rule that a link is counted
-/// as a file and a reparse-point directory as a folder, so a preview and the
-/// real run report the same numbers.
-fn measure_entry(path: &Path) -> Stats {
-    let Ok(meta) = fs::symlink_metadata(path) else {
+/// as a file and a directory that cannot be opened as a folder, so a preview and
+/// the real run report the same numbers.
+fn measure_entry(dir: &Dir, name: &OsStr) -> Stats {
+    let Ok(meta) = metadata_at(dir, name) else {
         return Stats::EMPTY;
     };
 
@@ -603,15 +777,21 @@ fn measure_entry(path: &Path) -> Stats {
     }
 
     if kind.is_dir() {
-        if !inside_fence(path) {
-            return Stats {
+        return match open_child_dir(dir, name) {
+            Ok(child) => {
+                let mut stats = measure_children(&child);
+                stats.folders += 1;
+                stats
+            }
+            // A directory that is a reparse point is counted as the folder it
+            // looks like: the run removes the entry itself, and a preview that
+            // disagreed with the run would be worse than one that is optimistic.
+            Err(_) => Stats {
                 files: 0,
                 folders: 1,
                 bytes: 0,
-            };
-        }
-
-        return measure_directory_tree(path);
+            },
+        };
     }
 
     Stats {
@@ -621,42 +801,79 @@ fn measure_entry(path: &Path) -> Stats {
     }
 }
 
-/// What removing `path` and everything inside it would count.
-fn measure_directory_tree(path: &Path) -> Stats {
+/// What removing every entry inside `dir` would count.
+fn measure_children(dir: &Dir) -> Stats {
     let mut stats = Stats::EMPTY;
 
-    if let Ok(entries) = fs::read_dir(path) {
+    if let Ok(entries) = dir.entries() {
         for entry in entries.flatten() {
-            stats += measure_entry(&entry.path());
+            stats += measure_entry(dir, &entry.file_name());
         }
     }
-
-    stats.folders += 1;
 
     stats
 }
 
-fn remove_directory_tree(path: &Path) -> Stats {
+/// Removes the directory `name` inside `dir`, everything in it, and then the
+/// directory itself through the handle that holds it.
+fn remove_tree(dir: &Dir, name: &OsStr, path: &Path) -> Stats {
     if session::dry_run() {
-        return measure_directory_tree(path);
+        return measure_entry(dir, name);
     }
 
     let mut stats = Stats::EMPTY;
 
-    if let Ok(entries) = fs::read_dir(path) {
-        for entry in entries.flatten() {
-            stats += remove_entry(&entry.path());
+    match open_child_dir(dir, name) {
+        Ok(child) => {
+            stats += remove_children(&child, path);
+
+            // Closed before the directory is removed: a cap-std handle is
+            // normally opened without delete sharing, so a live handle on the
+            // directory would make its own removal fail on Windows.
+            drop(child);
+        }
+        Err(error) => {
+            // Not a directory after all — a reparse point is the usual reason.
+            // Remove the entry itself, never what it points at: descending here
+            // is exactly the mistake this module is built to avoid.
+            return match metadata_at(dir, name) {
+                Ok(meta) if meta.file_type().is_symlink() => match dir.remove_file(name) {
+                    Ok(()) => Stats {
+                        files: 1,
+                        folders: 0,
+                        bytes: 0,
+                    },
+                    Err(remove_error) => {
+                        failed_at(dir, name, path, &remove_error);
+                        Stats::EMPTY
+                    }
+                },
+                Ok(_) => remove_dir_only(dir, name, path),
+                Err(_) => {
+                    failed_at(dir, name, path, &error);
+                    Stats::EMPTY
+                }
+            };
         }
     }
-
-    // A directory that could not be emptied stays: the engine never reports a
-    // folder it did not remove.
-    match fs::remove_dir(path) {
-        Ok(()) => stats.folders += 1,
-        Err(error) => failed(path, &error),
-    }
+    stats += remove_dir_only(dir, name, path);
 
     stats
+}
+
+/// Removes one directory entry, counting it as a folder only if it went.
+fn remove_dir_only(dir: &Dir, name: &OsStr, path: &Path) -> Stats {
+    match dir.remove_dir(name) {
+        Ok(()) => Stats {
+            files: 0,
+            folders: 1,
+            bytes: 0,
+        },
+        Err(error) => {
+            failed_at(dir, name, path, &error);
+            Stats::EMPTY
+        }
+    }
 }
 
 /// Expands `pattern` under `base` into concrete paths.

@@ -5,7 +5,6 @@ use image::codecs::gif::{GifDecoder, GifEncoder};
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::{CompressionType, FilterType, PngEncoder};
 use image::codecs::webp::WebPEncoder;
-use std::fs::File;
 use std::io::{self, BufReader, Cursor, Write};
 use std::path::Path;
 
@@ -43,8 +42,14 @@ pub fn optimize_single_with(
     }
 
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let _parent_dir = crate::open_dir_without_links(parent)?;
-    let original = std::fs::symlink_metadata(path)?;
+    // The handle, not the path, is what the replacement lands in: resolving
+    // the parent once here means a link swapped in for one of its components
+    // afterwards cannot redirect the write outside the tree that was checked.
+    let parent_dir = crate::open_dir_without_links(parent)?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path names no file"))?;
+    let original = parent_dir.symlink_metadata(name)?;
     if original.is_symlink() || !original.is_file() {
         return Ok(crate::custom_cleaners::GlobCleanStats::default());
     }
@@ -56,7 +61,7 @@ pub fn optimize_single_with(
 
     if ext == "gif" {
         let decoder =
-            GifDecoder::new(BufReader::new(File::open(path)?)).map_err(io::Error::other)?;
+            GifDecoder::new(BufReader::new(parent_dir.open(name)?)).map_err(io::Error::other)?;
         let mut frames = decoder.into_frames();
         frames.next().transpose().map_err(io::Error::other)?;
         if frames
@@ -69,10 +74,17 @@ pub fn optimize_single_with(
         }
     }
 
-    let img = image::open(path).map_err(|e| {
-        database::diag::warn(format!("[image_optimize] open failed: {e}"));
-        io::Error::new(io::ErrorKind::InvalidData, e)
-    })?;
+    let img = image::ImageReader::new(BufReader::new(parent_dir.open(name)?))
+        .with_guessed_format()
+        .map_err(|e| {
+            database::diag::warn(format!("[image_optimize] open failed: {e}"));
+            io::Error::new(io::ErrorKind::InvalidData, e)
+        })?
+        .decode()
+        .map_err(|e| {
+            database::diag::warn(format!("[image_optimize] open failed: {e}"));
+            io::Error::new(io::ErrorKind::InvalidData, e)
+        })?;
     // Bound peak: reject huge decoded pixel buffers (e.g. 5000x5000 RGBA ~100MB).
     let (w, h) = (img.width() as u64, img.height() as u64);
     if w.checked_mul(h).unwrap_or(u64::MAX).saturating_mul(4) > MAX_IMAGE_BYTES {
@@ -113,10 +125,19 @@ pub fn optimize_single_with(
     let mut replacement = tempfile::NamedTempFile::new_in(parent)?;
     replacement.write_all(&compressed)?;
     replacement.as_file().sync_all()?;
-    replacement
-        .as_file()
-        .set_permissions(original.permissions())?;
-    replacement.persist(path).map_err(|e| e.error)?;
+    let permissions = original.permissions().into_std(replacement.as_file())?;
+    replacement.as_file().set_permissions(permissions)?;
+
+    let replacement_path = replacement.into_temp_path();
+    let replacement_name = replacement_path
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "replacement names no file"))?;
+
+    // Renamed through the pinned parent handle, so the destination is the
+    // directory that was checked rather than whatever the path names now.
+    parent_dir.rename(replacement_name, &parent_dir, name)?;
+    // The temp name is gone, so dropping the guard finds nothing to clean up.
+    drop(replacement_path);
 
     database::diag::info(format!("[image_optimize] WRITTEN saved={saved}"));
     Ok(crate::custom_cleaners::GlobCleanStats::file(saved))
@@ -151,6 +172,7 @@ fn encode_bmp(w: &mut impl Write, img: &DynamicImage) -> io::Result<()> {
 mod tests {
     use super::*;
     use image::{Frame, ImageEncoder, Rgba, RgbaImage};
+    use std::fs::File;
 
     #[test]
     fn optimized_png_replaces_original_with_same_pixels() {
