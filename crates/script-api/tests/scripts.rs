@@ -730,13 +730,14 @@ fn rules_can_be_restricted_to_other_operating_systems() {
 }
 
 #[test]
-fn a_script_that_does_not_exist_yet_leaves_an_empty_set() {
+fn a_script_that_does_not_exist_yet_leaves_an_empty_set_and_no_directory() {
     let _guard = lock();
     let dir = tempfile::tempdir().unwrap();
     let scripts = script_api::load_from(dir.path().join("missing"));
 
-    // Loading creates the directory, so the user has somewhere to put a script.
-    assert!(dir.path().join("missing").is_dir());
+    // Loading does not create the directory: an empty folder appearing in the
+    // user's data directory just because the program ran is noise.
+    assert!(!dir.path().join("missing").exists());
     assert!(scripts.files.is_empty());
     assert!(scripts.custom.is_empty());
     assert!(scripts.errors.is_empty());

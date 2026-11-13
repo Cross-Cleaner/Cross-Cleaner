@@ -851,14 +851,9 @@ fn build(directory: PathBuf) -> Scripts {
         ..Scripts::default()
     };
 
-    if let Err(error) = fs::create_dir_all(&directory) {
-        scripts.errors.push(ScriptError::new(
-            directory,
-            format!("cannot create the scripts directory: {error}"),
-        ));
-        return scripts;
-    }
-
+    // The directory is never created here: a user who writes no scripts should
+    // not find an empty folder appear in their data directory because the
+    // program was started. A missing directory simply holds no scripts.
     let files = script_files(&directory);
 
     // Nothing to load: do not build the Rune context at all. It carries every
