@@ -1,9 +1,9 @@
-# Windows Clearing Programs Catalog v2.0.4.6
+# Windows Clearing Programs Catalog v2.0.4.7
 **Total categories in database:** 12
 
-**Total programs in database:** 290
+**Total programs in database:** 291
 
-**Total pathes in database:** 610
+**Total pathes in database:** 624
 
 ## AI
 
@@ -301,12 +301,13 @@
 | 5 | [Jitsi](https://desktop.jitsi.org) | Documentation |
 | 6 | [Litecord](https://github.com/Ak4ai/Litecord) | Cache, Logs |
 | 7 | [MAX](https://max.ru) | Cache |
-| 8 | [Serein](https://github.com/ViceVerse-cz/Serein) | Documentation |
-| 9 | [Signal](https://signal.org) | Cache, Logs |
-| 10 | [Telegram](https://desktop.telegram.org) | Accounts, Cache, Logs |
-| 11 | [Thunderbird](https://www.thunderbird.net) | Crashes |
-| 12 | [Vesktop](https://vesktop.dev) | Documentation |
-| 13 | [qTox](https://qtox.github.io) | Logs |
+| 8 | [Quill](https://github.com/shinycake/quill) | Cache, Documentation, Logs |
+| 9 | [Serein](https://github.com/ViceVerse-cz/Serein) | Documentation |
+| 10 | [Signal](https://signal.org) | Cache, Logs |
+| 11 | [Telegram](https://desktop.telegram.org) | Accounts, Cache, Logs |
+| 12 | [Thunderbird](https://www.thunderbird.net) | Crashes |
+| 13 | [Vesktop](https://vesktop.dev) | Documentation |
+| 14 | [qTox](https://qtox.github.io) | Logs |
 
 
 ## Minecraft Launcher
