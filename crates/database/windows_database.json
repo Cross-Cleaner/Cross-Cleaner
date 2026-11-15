@@ -7701,5 +7701,33 @@
     "directories_to_remove": [
       "Resources"
     ]
+  },
+  {
+    "path": "{drive}Users\\*\\AppData\\Local\\Kiri",
+    "class": "Utility",
+    "category": "Documentation",
+    "sub_category": "Licenses",
+    "program": "Kiri",
+    "files_to_remove": [
+      "LICENSE"
+    ]
+  },
+  {
+    "path": "{drive}Users\\*\\AppData\\Local\\Kiri",
+    "class": "Utility",
+    "category": "Documentation",
+    "program": "Kiri",
+    "files_to_remove": [
+      "NOTICE"
+    ]
+  },
+  {
+    "path": "{drive}Users\\*\\AppData\\Local\\Kiri",
+    "class": "Utility",
+    "category": "Logs",
+    "program": "Kiri",
+    "files_to_remove": [
+      "kiri-win.log"
+    ]
   }
 ]

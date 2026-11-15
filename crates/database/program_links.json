@@ -152,6 +152,7 @@
   "BoxedAppPacker": "https://www.boxedapp.com/boxedapppacker/download.html",
   "CMake": "https://cmake.org",
   "Cargo": "https://github.com/rust-lang/cargo",
+  "Kiri": "https://github.com/libracoder/kiri",
   "Docker": "https://www.docker.com/products/docker-desktop",
   "DotNet": "https://dotnet.microsoft.com/en-us/download",
   "Enigma Virtual Box": "https://enigmaprotector.com/en/downloads.html",
@@ -304,6 +305,7 @@
   "AltSnap": "https://github.com/RamonUnch/AltSnap",
   "HWiNFO": "https://www.hwinfo.com",
   "Windhawk": "https://windhawk.net",
+  "FanControl": "https://github.com/Rem0o/FanControl.Releases",
 
   "Amnezia VPN": "https://github.com/amnezia-vpn/amnezia-client",
   "Amnezia WG": "https://docs.amnezia.org/ru/documentation/amnezia-wg",
