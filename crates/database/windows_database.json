@@ -7682,5 +7682,24 @@
     "directories_to_remove": [
       "LOGS"
     ]
+  },
+  {
+    "path": "{drive}Program Files (x86)\\FanControl",
+    "class": "Utility",
+    "category": "Logs",
+    "program": "FanControl",
+    "remove_files": [
+      "log.txt"
+    ]
+  },
+  {
+    "path": "{drive}Program Files (x86)\\FanControl",
+    "class": "Utility",
+    "category": "Documentation",
+    "sub_category": "Licenses",
+    "program": "FanControl",
+    "directories_to_remove": [
+      "Resources"
+    ]
   }
 ]
