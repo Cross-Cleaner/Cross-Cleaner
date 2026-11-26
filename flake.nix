@@ -45,7 +45,7 @@
                 # A `let`, not an attribute of buildRustPackage: `env` below
                 # reads this value, and plain (non-`rec`) attrset members do
                 # not see each other.
-                version = "2.0.4.7";
+                version = "2.0.4.7.1";
               in
               rustPlatform.buildRustPackage {
                 pname = "cross-cleaner";
