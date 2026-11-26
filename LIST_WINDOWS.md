@@ -1,9 +1,9 @@
-# Windows Clearing Programs Catalog v2.0.4.7
+# Windows Clearing Programs Catalog v2.0.4.7.1
 **Total categories in database:** 12
 
-**Total programs in database:** 291
+**Total programs in database:** 293
 
-**Total pathes in database:** 624
+**Total pathes in database:** 626
 
 ## AI
 
@@ -17,8 +17,8 @@
 | 6 | [Microsoft Lobe](https://github.com/orgs/lobe) | Logs |
 | 7 | [OpenCode](https://opencode.ai/download) | LastActivity, Logs |
 | 8 | [OpenCode Desktop](https://opencode.ai/download) | Cache, Logs |
-| 9 | Pi | Accounts, LastActivity |
-| 10 | ZCode | Backups, Cache, LastActivity, Logs |
+| 9 | [Pi](https://pi.dev) | Accounts, LastActivity |
+| 10 | [ZCode](https://zcode.z.ai/en) | Backups, Cache, LastActivity, Logs |
 
 
 ## AntiCheat
@@ -139,18 +139,19 @@
 | 16 | [Insomnia](https://insomnia.rest) | Cache, Logs |
 | 17 | [Java](https://www.java.com/download) | Documentation |
 | 18 | [Kache](https://github.com/kunobi-ninja/kache) | Logs |
-| 19 | [MCCreator](https://mcreator.net/download) | Logs |
-| 20 | [Maven](https://maven.apache.org/download.cgi) | Documentation |
-| 21 | [MinGW](https://www.mingw-w64.org/downloads) | Documentation |
-| 22 | [Node JS](https://nodejs.org/en/download) | Cache, Documentation, Logs |
-| 23 | [Postman](https://www.postman.com/downloads) | Logs |
-| 24 | [Python](https://www.python.org/downloads) | Documentation |
-| 25 | [Recaf](https://github.com/Col-E/Recaf) | Logs |
-| 26 | [Rust Language](https://www.rust-lang.org/tools/install) | Documentation |
-| 27 | [RustRover](https://www.jetbrains.com/rust) | Documentation |
-| 28 | [Unity Hub](https://unity.com/download) | Documentation |
-| 29 | [Windows Kits](https://developer.microsoft.com/windows/downloads/windows-sdk) | Documentation |
-| 30 | [Xamarin](https://dotnet.microsoft.com/apps/xamarin) | Logs |
+| 19 | [Kiri](https://github.com/libracoder/kiri) | Documentation, Logs |
+| 20 | [MCCreator](https://mcreator.net/download) | Logs |
+| 21 | [Maven](https://maven.apache.org/download.cgi) | Documentation |
+| 22 | [MinGW](https://www.mingw-w64.org/downloads) | Documentation |
+| 23 | [Node JS](https://nodejs.org/en/download) | Cache, Documentation, Logs |
+| 24 | [Postman](https://www.postman.com/downloads) | Logs |
+| 25 | [Python](https://www.python.org/downloads) | Documentation |
+| 26 | [Recaf](https://github.com/Col-E/Recaf) | Logs |
+| 27 | [Rust Language](https://www.rust-lang.org/tools/install) | Documentation |
+| 28 | [RustRover](https://www.jetbrains.com/rust) | Documentation |
+| 29 | [Unity Hub](https://unity.com/download) | Documentation |
+| 30 | [Windows Kits](https://developer.microsoft.com/windows/downloads/windows-sdk) | Documentation |
+| 31 | [Xamarin](https://dotnet.microsoft.com/apps/xamarin) | Logs |
 
 
 ## Disk Analyzer
@@ -222,15 +223,15 @@
 | 1 | Albion Online | Cache, Logs |
 | 2 | [ArcheAge](https://archeage.ru) | Logs |
 | 3 | [Arizona Games Launcher](https://arizona-rp.com/#how-to-play) | Crashes, Images, Logs |
-| 4 | Borderlands 2 | Game, Logs |
-| 5 | Cossacks 3 | Game |
+| 4 | [Borderlands 2](https://store.steampowered.com/app/49520/Borderlands_2) | Game, Logs |
+| 5 | [Cossacks 3](https://store.steampowered.com/app/333420/Cossacks_3) | Game |
 | 6 | [Counter-Strike Global Offensive](https://store.steampowered.com/app/730/CounterStrike_2) | Game |
 | 7 | [DDNet](https://github.com/ddnet/ddnet) | Downloads, Game |
 | 8 | [Dota 2](https://www.dota2.com/home) | Game |
-| 9 | Dungeon Keeper 2 | Documentation, Logs |
+| 9 | [Dungeon Keeper 2](https://store.steampowered.com/app/2616460/Dungeon_Keeper_2) | Documentation, Logs |
 | 10 | [Electronic Arts Desktop](https://www.ea.com/ea-app) | Logs |
 | 11 | [Epic Games Launcher](https://store.epicgames.com/en-US/download) | Logs |
-| 12 | GTA San Andreas | Images, Logs |
+| 12 | [GTA San Andreas](https://www.rockstargames.com/games/sanandreas) | Images, Logs |
 | 13 | [Genshin Impact](https://genshin.hoyoverse.com) | Crashes, Documentation, Logs |
 | 14 | [Lords Mobile](https://lordsmobile.igg.com/pc) | Logs |
 | 15 | [Luanti](https://github.com/luanti-org/luanti) | Cache, Documentation, Logs |
@@ -240,7 +241,7 @@
 | 19 | Rockstar Games | Crashes |
 | 20 | [Rust](https://store.steampowered.com/app/252490/Rust) | Game |
 | 21 | [Schedule I](https://store.steampowered.com/app/3164500/Schedule_I) | Game, Logs |
-| 22 | Sephiria | Logs |
+| 22 | [Sephiria](https://store.steampowered.com/app/2436940/Sephiria) | Logs |
 | 23 | [Steam](https://store.steampowered.com/about) | Accounts, Documentation, Logs |
 | 24 | [Terraria](https://terraria.org) | Game |
 | 25 | [The Powder Toy](https://powdertoy.co.uk) | Game |
@@ -257,7 +258,7 @@
 | --- | --- | --- |
 | 1 | [Git](https://git-scm.com/downloads) | Documentation |
 | 2 | [GitHub Desktop](https://desktop.github.com/download) | Logs |
-| 3 | LazyGit | Documentation |
+| 3 | [LazyGit](https://lazygit.dev) | Documentation |
 | 4 | [rgitui](https://github.com/noahbclarkson/rgitui) | Cache, LastActivity |
 
 
@@ -320,7 +321,7 @@
 | 4 | [CubixWorld](https://cubixworld.net/start) | Game, Logs |
 | 5 | [CurseForge](https://www.curseforge.com/download/app) | Accounts, Cache, Cheats, Crashes, Documentation, Game, Images, Logs |
 | 6 | [GribLand](https://gribland.net/#start) | Accounts, Cache, Crashes, Documentation, Game, Images, Logs |
-| 7 | Horizon | Cache, Game, Logs |
+| 7 | [Horizon](https://github.com/horizon-rust/horizon) | Cache, Game, Logs |
 | 8 | [LabyMod](https://laby.net/client) | Logs |
 | 9 | [LoliLand](https://loliland.ru/ru/start) | Crashes, Documentation, Game, Images, Logs |
 | 10 | [Lunar Client](https://www.lunarclient.com/download) | Accounts, Cache, Documentation, Logs |
@@ -331,7 +332,7 @@
 | 15 | [MultiMC](https://multimc.org/#Download) | Accounts, Cache, Cheats, Crashes, Documentation, Game, Images, Logs |
 | 16 | [PolyMC](https://polymc.org/download) | Accounts, Cache, Cheats, Crashes, Documentation, Game, Images, Logs |
 | 17 | [PrismLauncher](https://prismlauncher.org/download/windows) | Accounts, Cache, Cheats, Crashes, Documentation, Game, Images, Logs |
-| 18 | Salwyrr Launcher | Documentation |
+| 18 | [Salwyrr Launcher](https://www.salwyrr.com) | Documentation |
 | 19 | [Tecknix Client](https://tecknix.com/download.html) | Accounts, Cache, Crashes, Documentation, Game, Images, Logs |
 | 20 | [X Minecraft Launcher](https://xmcl.app) | Game, Logs |
 
@@ -526,11 +527,12 @@
 | 2 | [CPU-Z](https://www.cpuid.com) | Documentation |
 | 3 | [CrystalDiskInfo](https://crystalmark.info) | Documentation |
 | 4 | [Everything](https://www.voidtools.com) | Documentation, LastActivity |
-| 5 | [HWiNFO](https://www.hwinfo.com) | Documentation |
-| 6 | [MiniBin](https://github.com/king-tri-ton/minibin) | Logs |
-| 7 | [PowerToys](https://github.com/microsoft/PowerToys) | Documentation |
-| 8 | [Unlocker](http://www.emptyloop.com/unlocker) | Documentation |
-| 9 | [Windhawk](https://windhawk.net) | Backups, Cache, Documentation, Logs |
+| 5 | [FanControl](https://github.com/Rem0o/FanControl.Releases) | Documentation, Logs |
+| 6 | [HWiNFO](https://www.hwinfo.com) | Documentation |
+| 7 | [MiniBin](https://github.com/king-tri-ton/minibin) | Logs |
+| 8 | [PowerToys](https://github.com/microsoft/PowerToys) | Documentation |
+| 9 | [Unlocker](http://www.emptyloop.com/unlocker) | Documentation |
+| 10 | [Windhawk](https://windhawk.net) | Backups, Cache, Documentation, Logs |
 
 
 ## VPN
